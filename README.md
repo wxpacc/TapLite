@@ -2,7 +2,7 @@
 
 TapLite 是一个面向 Windows 的轻量级连点器。项目使用 Python 标准库和 Tkinter 构建界面，通过 Windows `SendInput` API 发送鼠标输入，并使用 `RegisterHotKey` 提供全局热键。
 
-TapLite 的目标是提供一个清晰、轻量、可维护的桌面工具，适用于普通窗口、无边框窗口和常见全屏场景。项目不会绕过反作弊系统，不会向游戏进程注入代码，也不会实现后台窗口隐藏点击。
+TapLite 的目标是提供一个清晰、轻量、可维护的桌面工具，适用于普通窗口、无边框窗口和常见全屏场景。项目不绕过反作弊系统，不向游戏进程注入代码，也不实现后台窗口隐藏点击。
 
 ## 项目状态
 
@@ -44,18 +44,40 @@ python -m compileall main.py taplite tests
 
 ## 打包
 
-安装 PyInstaller 后可以构建单文件可执行程序：
+推荐使用项目脚本构建发布文件：
 
 ```powershell
-python -m pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name TapLite main.py
+.\scripts\build.ps1
 ```
 
 生成文件位于：
 
 ```text
-dist\TapLite.exe
+releases\TapLite.exe
 ```
+
+临时构建目录和缓存可通过以下命令清理：
+
+```powershell
+.\scripts\clean.ps1
+```
+
+## 项目结构
+
+```text
+TapLite/
+├─ taplite/      # 应用源码
+├─ tests/        # 自动化测试
+├─ scripts/      # 构建和清理脚本
+├─ docs/         # 项目说明文档
+├─ releases/     # 用户可直接使用的发布成品
+├─ .github/
+├─ main.py
+├─ pyproject.toml
+└─ README.md
+```
+
+更多结构说明见 [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md)。
 
 ## GitHub 工作流
 
@@ -73,26 +95,3 @@ dist\TapLite.exe
 - 注释只解释必要的业务意图、平台限制或非显而易见的实现原因。
 - Windows API 调用集中在 `taplite/win_input.py` 和 `taplite/hotkeys.py`。
 - UI、点击状态机、配置读写保持职责分离。
-
-## 项目结构
-
-```text
-TapLite/
-├── .github/
-├── main.py
-├── taplite/
-│   ├── clicker.py
-│   ├── hotkeys.py
-│   ├── settings.py
-│   ├── ui.py
-│   └── win_input.py
-├── tests/
-├── AGENTS.md
-├── CHANGELOG.md
-├── CODE_OF_CONDUCT.md
-├── CONTRIBUTING.md
-├── SECURITY.md
-├── pyproject.toml
-├── README.md
-└── .gitignore
-```
