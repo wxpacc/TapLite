@@ -3,31 +3,31 @@ from __future__ import annotations
 import queue
 import sys
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
-from .clicker import AutoClicker, ClickConfig, ClickEvent
+from .clicker import AutoClicker, ClickConfig, ClickEvent, ClickPoint
 from .hotkeys import HOTKEY_ACTION_STOP, HOTKEY_ACTION_TOGGLE, HotkeyManager, hotkey_to_vk
-from .settings import Settings, load_settings, save_settings
+from .settings import Settings, load_settings, save_settings, settings_to_preset, sanitize_settings
 from .win_input import get_cursor_position, is_running_as_admin, send_click, set_cursor_position
 
 
-BUTTON_LABELS = {"left": "左键", "right": "右键", "middle": "中键"}
-CLICK_TYPE_LABELS = {"single": "单击", "double": "双击"}
-REPEAT_LABELS = {"infinite": "无限循环", "count": "指定次数"}
-POSITION_LABELS = {"current": "当前位置", "fixed": "固定坐标"}
+LOW_INTERVAL_WARNING_MS = 10
 
 
 class TapLiteApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("TapLite")
-        self.geometry("420x470")
-        self.resizable(False, False)
+        self.geometry("620x680")
+        self.minsize(560, 560)
+        self.resizable(True, True)
+        self._configure_style()
 
         self.settings = load_settings()
         self.event_queue: queue.Queue[ClickEvent] = queue.Queue()
         self.clicker = AutoClicker(send_click, set_cursor_position, self.event_queue)
         self.hotkeys = HotkeyManager(self._on_hotkey)
+        self.config_widgets: list[tk.Widget] = []
 
         self.interval_var = tk.StringVar(value=str(self.settings.interval_ms))
         self.button_var = tk.StringVar(value=self.settings.mouse_button)
@@ -39,71 +39,203 @@ class TapLiteApp(tk.Tk):
         self.fixed_y_var = tk.StringVar(value=str(self.settings.fixed_y))
         self.toggle_hotkey_var = tk.StringVar(value=self.settings.toggle_hotkey)
         self.stop_hotkey_var = tk.StringVar(value=self.settings.stop_hotkey)
+        self.click_mode_var = tk.StringVar(value=self.settings.click_mode)
+        self.random_interval_var = tk.BooleanVar(value=self.settings.random_interval_enabled)
+        self.random_interval_min_var = tk.StringVar(value=str(self.settings.random_interval_min_ms))
+        self.random_interval_max_var = tk.StringVar(value=str(self.settings.random_interval_max_ms))
+        self.random_offset_var = tk.BooleanVar(value=self.settings.random_offset_enabled)
+        self.random_offset_px_var = tk.StringVar(value=str(self.settings.random_offset_px))
+        self.start_delay_var = tk.StringVar(value=str(self.settings.start_delay_seconds))
+        self.run_limit_var = tk.BooleanVar(value=self.settings.run_limit_seconds > 0)
+        self.run_limit_seconds_var = tk.StringVar(value=str(self.settings.run_limit_seconds or 60))
+        self.preset_name_var = tk.StringVar()
         self.status_var = tk.StringVar(value="就绪")
         self.count_var = tk.StringVar(value="0")
         self.notice_var = tk.StringVar(value=self._build_notice())
+        self.action_text_var = tk.StringVar(value="开始 (F6)")
 
         self._build_ui()
+        self._load_points(self.settings.click_points or [])
+        self._refresh_running_state()
         self._refresh_enabled_fields()
+        self._refresh_preset_names()
         self._install_hotkeys()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._poll_events)
 
+    def _configure_style(self) -> None:
+        style = ttk.Style(self)
+        style.configure("TFrame", background="#f7f8fa")
+        style.configure("TLabel", background="#f7f8fa", foreground="#1f2937")
+        style.configure("Muted.TLabel", foreground="#6b7280")
+        style.configure("Title.TLabel", font=("Segoe UI", 18, "bold"))
+        style.configure("Value.TLabel", font=("Segoe UI", 11, "bold"))
+        style.configure("TLabelframe", background="#f7f8fa")
+        style.configure("TLabelframe.Label", background="#f7f8fa", foreground="#374151")
+        style.configure("TButton", padding=(10, 5))
+        style.configure("Accent.TButton", padding=(14, 6))
+
     def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=16)
-        root.pack(fill="both", expand=True)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
 
-        header = ttk.Frame(root)
-        header.pack(fill="x")
-        ttk.Label(header, text="TapLite", font=("Segoe UI", 18, "bold")).pack(anchor="w")
-        ttk.Label(header, textvariable=self.notice_var, wraplength=380).pack(anchor="w", pady=(4, 12))
+        shell = ttk.Frame(self, padding=14)
+        shell.grid(row=0, column=0, sticky="nsew")
+        shell.columnconfigure(0, weight=1)
+        shell.rowconfigure(1, weight=1)
 
-        status = ttk.LabelFrame(root, text="状态", padding=10)
-        status.pack(fill="x", pady=(0, 10))
-        ttk.Label(status, text="运行状态").grid(row=0, column=0, sticky="w")
-        ttk.Label(status, textvariable=self.status_var).grid(row=0, column=1, sticky="e")
-        ttk.Label(status, text="已点击").grid(row=1, column=0, sticky="w", pady=(6, 0))
-        ttk.Label(status, textvariable=self.count_var).grid(row=1, column=1, sticky="e", pady=(6, 0))
-        status.columnconfigure(1, weight=1)
+        self._build_header(shell)
 
-        click = ttk.LabelFrame(root, text="点击设置", padding=10)
-        click.pack(fill="x", pady=(0, 10))
-        ttk.Label(click, text="间隔(ms)").grid(row=0, column=0, sticky="w")
-        ttk.Entry(click, textvariable=self.interval_var, width=10).grid(row=0, column=1, sticky="w")
-        ttk.Label(click, text="鼠标键").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Combobox(click, textvariable=self.button_var, values=list(BUTTON_LABELS), state="readonly", width=10).grid(row=1, column=1, sticky="w", pady=(8, 0))
-        ttk.Label(click, text="点击类型").grid(row=1, column=2, sticky="w", padx=(20, 0), pady=(8, 0))
-        ttk.Combobox(click, textvariable=self.click_type_var, values=list(CLICK_TYPE_LABELS), state="readonly", width=10).grid(row=1, column=3, sticky="w", pady=(8, 0))
+        notebook = ttk.Notebook(shell)
+        notebook.grid(row=1, column=0, sticky="nsew")
+        notebook.add(self._build_basic_tab(notebook), text="基础")
+        notebook.add(self._build_points_tab(notebook), text="多点")
+        notebook.add(self._build_advanced_tab(notebook), text="高级")
+        notebook.add(self._build_presets_tab(notebook), text="预设")
 
-        repeat = ttk.LabelFrame(root, text="重复", padding=10)
-        repeat.pack(fill="x", pady=(0, 10))
-        ttk.Radiobutton(repeat, text="无限循环", variable=self.repeat_mode_var, value="infinite", command=self._refresh_enabled_fields).grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(repeat, text="指定次数", variable=self.repeat_mode_var, value="count", command=self._refresh_enabled_fields).grid(row=0, column=1, sticky="w")
-        self.repeat_count_entry = ttk.Entry(repeat, textvariable=self.repeat_count_var, width=10)
-        self.repeat_count_entry.grid(row=0, column=2, sticky="w", padx=(12, 0))
+        actions = ttk.Frame(shell)
+        actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
+        actions.columnconfigure(0, weight=1)
+        ttk.Button(actions, textvariable=self.action_text_var, style="Accent.TButton", command=self._toggle_clicking).grid(row=0, column=0, sticky="ew")
+        ttk.Button(actions, text="停止 (F8)", command=self._stop_clicking).grid(row=0, column=1, sticky="e", padx=(8, 0))
 
-        position = ttk.LabelFrame(root, text="位置", padding=10)
-        position.pack(fill="x", pady=(0, 10))
-        ttk.Radiobutton(position, text="跟随当前位置", variable=self.position_mode_var, value="current", command=self._refresh_enabled_fields).grid(row=0, column=0, sticky="w")
-        ttk.Radiobutton(position, text="固定坐标", variable=self.position_mode_var, value="fixed", command=self._refresh_enabled_fields).grid(row=0, column=1, sticky="w")
-        self.fixed_x_entry = ttk.Entry(position, textvariable=self.fixed_x_var, width=8)
-        self.fixed_y_entry = ttk.Entry(position, textvariable=self.fixed_y_var, width=8)
-        self.fixed_x_entry.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.fixed_y_entry.grid(row=1, column=1, sticky="w", pady=(8, 0))
-        ttk.Button(position, text="读取当前坐标", command=self._capture_position).grid(row=1, column=2, sticky="w", pady=(8, 0))
+    def _build_header(self, parent: ttk.Frame) -> None:
+        header = ttk.Frame(parent)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="TapLite", style="Title.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(header, text="状态").grid(row=0, column=1, sticky="e")
+        ttk.Label(header, textvariable=self.status_var, style="Value.TLabel").grid(row=0, column=2, sticky="e", padx=(8, 0))
+        ttk.Label(header, text="点击").grid(row=1, column=1, sticky="e", pady=(4, 0))
+        ttk.Label(header, textvariable=self.count_var, style="Value.TLabel").grid(row=1, column=2, sticky="e", padx=(8, 0), pady=(4, 0))
+        ttk.Label(header, textvariable=self.notice_var, style="Muted.TLabel", wraplength=560).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
 
-        hotkeys = ttk.LabelFrame(root, text="热键", padding=10)
-        hotkeys.pack(fill="x", pady=(0, 10))
+    def _build_basic_tab(self, parent: ttk.Notebook) -> ttk.Frame:
+        tab = ttk.Frame(parent, padding=12)
+        for column in range(4):
+            tab.columnconfigure(column, weight=1)
+
+        mode = ttk.LabelFrame(tab, text="点击模式", padding=10)
+        mode.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+        self._add_config_widget(ttk.Radiobutton(mode, text="单点", variable=self.click_mode_var, value="single_point", command=self._refresh_enabled_fields)).grid(row=0, column=0, sticky="w")
+        self._add_config_widget(ttk.Radiobutton(mode, text="多点", variable=self.click_mode_var, value="multi_point", command=self._refresh_enabled_fields)).grid(row=0, column=1, sticky="w", padx=(16, 0))
+
+        click = ttk.LabelFrame(tab, text="点击设置", padding=10)
+        click.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+        for column in range(6):
+            click.columnconfigure(column, weight=1)
+        self._add_config_widget(ttk.Label(click, text="间隔(ms)")).grid(row=0, column=0, sticky="w")
+        self._add_config_widget(ttk.Entry(click, textvariable=self.interval_var, width=9)).grid(row=0, column=1, sticky="w")
+        self._add_config_widget(ttk.Radiobutton(click, text="单击", variable=self.click_type_var, value="single")).grid(row=0, column=2, sticky="w")
+        self._add_config_widget(ttk.Radiobutton(click, text="双击", variable=self.click_type_var, value="double")).grid(row=0, column=3, sticky="w")
+        self._add_config_widget(ttk.Radiobutton(click, text="左键", variable=self.button_var, value="left")).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        self._add_config_widget(ttk.Radiobutton(click, text="右键", variable=self.button_var, value="right")).grid(row=1, column=2, sticky="w", pady=(8, 0))
+        self._add_config_widget(ttk.Radiobutton(click, text="中键", variable=self.button_var, value="middle")).grid(row=1, column=3, sticky="w", pady=(8, 0))
+
+        repeat = ttk.LabelFrame(tab, text="重复", padding=10)
+        repeat.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=(0, 6))
+        self._add_config_widget(ttk.Radiobutton(repeat, text="无限循环", variable=self.repeat_mode_var, value="infinite", command=self._refresh_enabled_fields)).grid(row=0, column=0, sticky="w")
+        self._add_config_widget(ttk.Radiobutton(repeat, text="指定次数/轮数", variable=self.repeat_mode_var, value="count", command=self._refresh_enabled_fields)).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.repeat_count_entry = self._add_config_widget(ttk.Entry(repeat, textvariable=self.repeat_count_var, width=8))
+        self.repeat_count_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+
+        position = ttk.LabelFrame(tab, text="单点位置", padding=10)
+        position.grid(row=2, column=2, columnspan=2, sticky="nsew", padx=(6, 0))
+        self._add_config_widget(ttk.Radiobutton(position, text="当前位置", variable=self.position_mode_var, value="current", command=self._refresh_enabled_fields)).grid(row=0, column=0, columnspan=5, sticky="w")
+        self._add_config_widget(ttk.Radiobutton(position, text="固定坐标", variable=self.position_mode_var, value="fixed", command=self._refresh_enabled_fields)).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self._add_config_widget(ttk.Label(position, text="X")).grid(row=1, column=1, sticky="e", padx=(8, 2), pady=(8, 0))
+        self.fixed_x_entry = self._add_config_widget(ttk.Entry(position, textvariable=self.fixed_x_var, width=6))
+        self.fixed_x_entry.grid(row=1, column=2, sticky="w", pady=(8, 0))
+        self._add_config_widget(ttk.Label(position, text="Y")).grid(row=1, column=3, sticky="e", padx=(6, 2), pady=(8, 0))
+        self.fixed_y_entry = self._add_config_widget(ttk.Entry(position, textvariable=self.fixed_y_var, width=6))
+        self.fixed_y_entry.grid(row=1, column=4, sticky="w", pady=(8, 0))
+        self.capture_button = self._add_config_widget(ttk.Button(position, text="读取坐标", command=self._capture_position))
+        self.capture_button.grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 0))
+        return tab
+
+    def _build_points_tab(self, parent: ttk.Notebook) -> ttk.Frame:
+        tab = ttk.Frame(parent, padding=12)
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(0, weight=1)
+
+        self.points_tree = ttk.Treeview(tab, columns=("x", "y", "wait"), show="headings", height=8)
+        self.points_tree.heading("x", text="X")
+        self.points_tree.heading("y", text="Y")
+        self.points_tree.heading("wait", text="等待(ms)")
+        self.points_tree.column("x", width=80, anchor="center")
+        self.points_tree.column("y", width=80, anchor="center")
+        self.points_tree.column("wait", width=90, anchor="center")
+        self.points_tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(tab, orient="vertical", command=self.points_tree.yview)
+        self.points_tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        buttons = ttk.Frame(tab)
+        buttons.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        for index, (text, command) in enumerate(
+            (
+                ("添加当前位置", self._add_current_point),
+                ("编辑", self._edit_selected_point),
+                ("删除", self._delete_selected_point),
+                ("上移", lambda: self._move_selected_point(-1)),
+                ("下移", lambda: self._move_selected_point(1)),
+            )
+        ):
+            button = self._add_config_widget(ttk.Button(buttons, text=text, command=command))
+            button.grid(row=0, column=index, padx=(0, 8))
+        return tab
+
+    def _build_advanced_tab(self, parent: ttk.Notebook) -> ttk.Frame:
+        tab = ttk.Frame(parent, padding=12)
+        random_frame = ttk.LabelFrame(tab, text="随机化", padding=10)
+        random_frame.pack(fill="x", pady=(0, 10))
+        self._add_config_widget(ttk.Checkbutton(random_frame, text="随机间隔", variable=self.random_interval_var, command=self._refresh_enabled_fields)).grid(row=0, column=0, sticky="w")
+        self.random_min_entry = self._add_config_widget(ttk.Entry(random_frame, textvariable=self.random_interval_min_var, width=8))
+        self.random_min_entry.grid(row=0, column=1, padx=(8, 2))
+        ttk.Label(random_frame, text="-").grid(row=0, column=2)
+        self.random_max_entry = self._add_config_widget(ttk.Entry(random_frame, textvariable=self.random_interval_max_var, width=8))
+        self.random_max_entry.grid(row=0, column=3, padx=(2, 4))
+        ttk.Label(random_frame, text="ms").grid(row=0, column=4, sticky="w")
+        self._add_config_widget(ttk.Checkbutton(random_frame, text="随机坐标偏移", variable=self.random_offset_var, command=self._refresh_enabled_fields)).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.random_offset_entry = self._add_config_widget(ttk.Entry(random_frame, textvariable=self.random_offset_px_var, width=8))
+        self.random_offset_entry.grid(row=1, column=1, sticky="w", padx=(8, 2), pady=(8, 0))
+        ttk.Label(random_frame, text="px").grid(row=1, column=2, sticky="w", pady=(8, 0))
+
+        run_frame = ttk.LabelFrame(tab, text="运行控制", padding=10)
+        run_frame.pack(fill="x")
+        self._add_config_widget(ttk.Label(run_frame, text="启动倒计时")).grid(row=0, column=0, sticky="w")
+        self.start_delay_combo = self._add_config_widget(ttk.Combobox(run_frame, textvariable=self.start_delay_var, values=("0", "1", "3", "5"), state="readonly", width=8))
+        self.start_delay_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(run_frame, text="秒").grid(row=0, column=2, sticky="w", padx=(4, 0))
+        self._add_config_widget(ttk.Checkbutton(run_frame, text="运行时限", variable=self.run_limit_var, command=self._refresh_enabled_fields)).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.run_limit_entry = self._add_config_widget(ttk.Entry(run_frame, textvariable=self.run_limit_seconds_var, width=8))
+        self.run_limit_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
+        ttk.Label(run_frame, text="秒").grid(row=1, column=2, sticky="w", padx=(4, 0), pady=(8, 0))
+
+        hotkeys = ttk.LabelFrame(tab, text="热键", padding=10)
+        hotkeys.pack(fill="x", pady=(10, 0))
         ttk.Label(hotkeys, text="开始/停止").grid(row=0, column=0, sticky="w")
-        ttk.Entry(hotkeys, textvariable=self.toggle_hotkey_var, width=10).grid(row=0, column=1, sticky="w")
-        ttk.Label(hotkeys, text="紧急停止").grid(row=0, column=2, sticky="w", padx=(20, 0))
-        ttk.Entry(hotkeys, textvariable=self.stop_hotkey_var, width=10).grid(row=0, column=3, sticky="w")
-        ttk.Button(hotkeys, text="应用热键", command=self._install_hotkeys).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(hotkeys, textvariable=self.toggle_hotkey_var, width=8).grid(row=0, column=1, sticky="w", padx=(8, 16))
+        ttk.Label(hotkeys, text="紧急停止").grid(row=0, column=2, sticky="w")
+        ttk.Entry(hotkeys, textvariable=self.stop_hotkey_var, width=8).grid(row=0, column=3, sticky="w", padx=(8, 16))
+        ttk.Button(hotkeys, text="应用", command=self._install_hotkeys).grid(row=0, column=4, sticky="e")
+        return tab
 
-        actions = ttk.Frame(root)
-        actions.pack(fill="x")
-        ttk.Button(actions, text="开始/停止 (F6)", command=self._toggle_clicking).pack(side="left")
-        ttk.Button(actions, text="停止 (F8)", command=self._stop_clicking).pack(side="left", padx=(8, 0))
+    def _build_presets_tab(self, parent: ttk.Notebook) -> ttk.Frame:
+        tab = ttk.Frame(parent, padding=12)
+        tab.columnconfigure(1, weight=1)
+        ttk.Label(tab, text="预设名称").grid(row=0, column=0, sticky="w")
+        self.preset_combo = ttk.Combobox(tab, textvariable=self.preset_name_var, values=(), width=28)
+        self.preset_combo.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        ttk.Button(tab, text="保存预设", command=self._save_preset).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Button(tab, text="载入预设", command=self._load_preset).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
+        ttk.Button(tab, text="删除预设", command=self._delete_preset).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
+        ttk.Label(tab, text="预设只保存在本机 settings.json，不会进入版本控制。", style="Muted.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        return tab
+
+    def _add_config_widget(self, widget: tk.Widget) -> tk.Widget:
+        self.config_widgets.append(widget)
+        return widget
 
     def _build_notice(self) -> str:
         if sys.platform != "win32":
@@ -112,12 +244,95 @@ class TapLiteApp(tk.Tk):
             return "若目标游戏以管理员权限运行，请也用管理员权限启动 TapLite。"
         return "管理员模式运行中。部分游戏或反作弊可能会屏蔽模拟输入。"
 
+    def _set_config_widgets_state(self, state: str) -> None:
+        for widget in self.config_widgets:
+            try:
+                widget.configure(state=state)
+            except tk.TclError:
+                pass
+
+    def _refresh_running_state(self) -> None:
+        if self.clicker.is_running:
+            self.action_text_var.set("停止 (F6)")
+            self._set_config_widgets_state("disabled")
+        else:
+            self.action_text_var.set("开始 (F6)")
+            self._set_config_widgets_state("normal")
+            self._refresh_enabled_fields()
+
     def _refresh_enabled_fields(self) -> None:
+        if self.clicker.is_running:
+            return
         repeat_state = "normal" if self.repeat_mode_var.get() == "count" else "disabled"
-        position_state = "normal" if self.position_mode_var.get() == "fixed" else "disabled"
+        fixed_state = "normal" if self.position_mode_var.get() == "fixed" and self.click_mode_var.get() == "single_point" else "disabled"
         self.repeat_count_entry.configure(state=repeat_state)
-        self.fixed_x_entry.configure(state=position_state)
-        self.fixed_y_entry.configure(state=position_state)
+        self.fixed_x_entry.configure(state=fixed_state)
+        self.fixed_y_entry.configure(state=fixed_state)
+        self.capture_button.configure(state="normal" if self.click_mode_var.get() == "single_point" else "disabled")
+        self.random_min_entry.configure(state="normal" if self.random_interval_var.get() else "disabled")
+        self.random_max_entry.configure(state="normal" if self.random_interval_var.get() else "disabled")
+        self.random_offset_entry.configure(state="normal" if self.random_offset_var.get() else "disabled")
+        self.run_limit_entry.configure(state="normal" if self.run_limit_var.get() else "disabled")
+
+    def _load_points(self, points: list[ClickPoint]) -> None:
+        for item in self.points_tree.get_children():
+            self.points_tree.delete(item)
+        for point in points:
+            self.points_tree.insert("", "end", values=(point.x, point.y, point.wait_ms))
+
+    def _read_points(self) -> list[ClickPoint]:
+        points: list[ClickPoint] = []
+        for item in self.points_tree.get_children():
+            x, y, wait_ms = self.points_tree.item(item, "values")
+            points.append(ClickPoint(int(x), int(y), int(wait_ms)))
+        return points
+
+    def _add_current_point(self) -> None:
+        try:
+            x, y = get_cursor_position()
+        except Exception as exc:
+            messagebox.showerror("无法读取坐标", str(exc))
+            return
+        self.points_tree.insert("", "end", values=(x, y, self.interval_var.get()))
+        self.status_var.set(f"已添加点 X={x}, Y={y}")
+
+    def _selected_point(self) -> str | None:
+        selection = self.points_tree.selection()
+        if not selection:
+            messagebox.showinfo("请选择点位", "请先选择一个多点列表项。")
+            return None
+        return selection[0]
+
+    def _edit_selected_point(self) -> None:
+        item = self._selected_point()
+        if item is None:
+            return
+        x, y, wait_ms = self.points_tree.item(item, "values")
+        new_x = simpledialog.askinteger("编辑 X", "X 坐标", initialvalue=int(x), minvalue=0, parent=self)
+        if new_x is None:
+            return
+        new_y = simpledialog.askinteger("编辑 Y", "Y 坐标", initialvalue=int(y), minvalue=0, parent=self)
+        if new_y is None:
+            return
+        new_wait = simpledialog.askinteger("编辑等待", "等待毫秒，0 表示使用全局间隔", initialvalue=int(wait_ms), minvalue=0, parent=self)
+        if new_wait is None:
+            return
+        self.points_tree.item(item, values=(new_x, new_y, new_wait))
+
+    def _delete_selected_point(self) -> None:
+        item = self._selected_point()
+        if item:
+            self.points_tree.delete(item)
+
+    def _move_selected_point(self, offset: int) -> None:
+        item = self._selected_point()
+        if item is None:
+            return
+        siblings = list(self.points_tree.get_children())
+        index = siblings.index(item)
+        new_index = index + offset
+        if 0 <= new_index < len(siblings):
+            self.points_tree.move(item, "", new_index)
 
     def _capture_position(self) -> None:
         try:
@@ -127,6 +342,7 @@ class TapLiteApp(tk.Tk):
             return
         self.fixed_x_var.set(str(x))
         self.fixed_y_var.set(str(y))
+        self.status_var.set(f"已读取坐标 X={x}, Y={y}")
 
     def _read_config(self) -> ClickConfig | None:
         try:
@@ -134,18 +350,31 @@ class TapLiteApp(tk.Tk):
             repeat_count = int(self.repeat_count_var.get())
             fixed_x = int(self.fixed_x_var.get())
             fixed_y = int(self.fixed_y_var.get())
+            random_min = int(self.random_interval_min_var.get())
+            random_max = int(self.random_interval_max_var.get())
+            random_offset = int(self.random_offset_px_var.get())
+            start_delay = int(self.start_delay_var.get())
+            run_limit = int(self.run_limit_seconds_var.get()) if self.run_limit_var.get() else 0
         except ValueError:
-            messagebox.showerror("输入错误", "间隔、次数和坐标必须是整数。")
+            messagebox.showerror("输入错误", "间隔、次数、坐标和高级参数必须是整数。")
             return None
 
-        if interval_ms < 1:
-            messagebox.showerror("输入错误", "点击间隔至少为 1 ms。")
+        if interval_ms < 1 or repeat_count < 1:
+            messagebox.showerror("输入错误", "点击间隔和指定次数必须大于 0。")
             return None
-        if repeat_count < 1:
-            messagebox.showerror("输入错误", "指定次数必须大于 0。")
+        if fixed_x < 0 or fixed_y < 0 or random_offset < 0:
+            messagebox.showerror("输入错误", "坐标和随机偏移必须是非负整数。")
             return None
-        if fixed_x < 0 or fixed_y < 0:
-            messagebox.showerror("输入错误", "固定坐标必须是非负整数。")
+        if random_min < 1 or random_max < random_min:
+            messagebox.showerror("输入错误", "随机间隔范围必须有效。")
+            return None
+        if run_limit < 0:
+            messagebox.showerror("输入错误", "运行时限必须是非负整数。")
+            return None
+
+        points = self._read_points()
+        if self.click_mode_var.get() == "multi_point" and not points:
+            messagebox.showerror("输入错误", "多点模式至少需要一个点位。")
             return None
 
         return ClickConfig(
@@ -157,16 +386,42 @@ class TapLiteApp(tk.Tk):
             position_mode=self.position_mode_var.get(),  # type: ignore[arg-type]
             fixed_x=fixed_x,
             fixed_y=fixed_y,
+            click_mode=self.click_mode_var.get(),  # type: ignore[arg-type]
+            click_points=points,
+            random_interval_enabled=self.random_interval_var.get(),
+            random_interval_min_ms=random_min,
+            random_interval_max_ms=random_max,
+            random_offset_enabled=self.random_offset_var.get(),
+            random_offset_px=random_offset,
+            start_delay_seconds=start_delay,
+            run_limit_seconds=run_limit,
+        )
+
+    def _confirm_low_interval(self, config: ClickConfig) -> bool:
+        interval_ms = config.random_interval_min_ms if config.random_interval_enabled else config.interval_ms
+        if interval_ms >= LOW_INTERVAL_WARNING_MS:
+            return True
+        return messagebox.askyesno(
+            "确认高速点击",
+            f"当前最小间隔为 {interval_ms} ms，可能导致目标窗口卡顿或难以及时停止。是否继续？",
         )
 
     def _toggle_clicking(self) -> None:
-        config = self._read_config()
-        if config is None:
+        if self.clicker.is_running:
+            self.clicker.stop()
+            self._refresh_running_state()
             return
-        self.clicker.toggle(config)
+        config = self._read_config()
+        if config is None or not self._confirm_low_interval(config):
+            return
+        if config.repeat_mode == "infinite":
+            self.status_var.set("准备开始，F8 可紧急停止")
+        self.clicker.start(config)
+        self._refresh_running_state()
 
     def _stop_clicking(self) -> None:
         self.clicker.stop()
+        self._refresh_running_state()
 
     def _on_hotkey(self, action: str) -> None:
         if action == HOTKEY_ACTION_TOGGLE:
@@ -198,15 +453,23 @@ class TapLiteApp(tk.Tk):
         self.after(100, self._poll_events)
 
     def _handle_click_event(self, event: ClickEvent) -> None:
-        if event.kind == "started":
-            self.status_var.set("运行中")
+        if event.kind == "countdown":
+            self.status_var.set(f"{event.message} 秒后开始")
+        elif event.kind == "started":
+            self.status_var.set("运行中，F8 可紧急停止")
+            self._refresh_running_state()
         elif event.kind == "clicked":
             self.count_var.set(str(event.count))
+        elif event.kind == "limit_reached":
+            self.status_var.set("已达到运行时限")
         elif event.kind == "stopped":
-            self.status_var.set("已停止")
+            if self.status_var.get() != "已达到运行时限":
+                self.status_var.set("已停止")
             self.count_var.set(str(event.count))
+            self._refresh_running_state()
         elif event.kind == "error":
             self.status_var.set("发生错误")
+            self._refresh_running_state()
             messagebox.showerror("点击失败", event.message)
 
     def _collect_settings(self) -> Settings:
@@ -224,7 +487,84 @@ class TapLiteApp(tk.Tk):
             fixed_y=config.fixed_y,
             toggle_hotkey=self.toggle_hotkey_var.get().strip().upper(),
             stop_hotkey=self.stop_hotkey_var.get().strip().upper(),
+            click_mode=config.click_mode,
+            click_points=config.click_points or [],
+            random_interval_enabled=config.random_interval_enabled,
+            random_interval_min_ms=config.random_interval_min_ms,
+            random_interval_max_ms=config.random_interval_max_ms,
+            random_offset_enabled=config.random_offset_enabled,
+            random_offset_px=config.random_offset_px,
+            start_delay_seconds=config.start_delay_seconds,
+            run_limit_seconds=config.run_limit_seconds,
+            presets=self.settings.presets or {},
         )
+
+    def _apply_settings(self, settings: Settings) -> None:
+        self.interval_var.set(str(settings.interval_ms))
+        self.button_var.set(settings.mouse_button)
+        self.click_type_var.set(settings.click_type)
+        self.repeat_mode_var.set(settings.repeat_mode)
+        self.repeat_count_var.set(str(settings.repeat_count))
+        self.position_mode_var.set(settings.position_mode)
+        self.fixed_x_var.set(str(settings.fixed_x))
+        self.fixed_y_var.set(str(settings.fixed_y))
+        self.toggle_hotkey_var.set(settings.toggle_hotkey)
+        self.stop_hotkey_var.set(settings.stop_hotkey)
+        self.click_mode_var.set(settings.click_mode)
+        self.random_interval_var.set(settings.random_interval_enabled)
+        self.random_interval_min_var.set(str(settings.random_interval_min_ms))
+        self.random_interval_max_var.set(str(settings.random_interval_max_ms))
+        self.random_offset_var.set(settings.random_offset_enabled)
+        self.random_offset_px_var.set(str(settings.random_offset_px))
+        self.start_delay_var.set(str(settings.start_delay_seconds))
+        self.run_limit_var.set(settings.run_limit_seconds > 0)
+        self.run_limit_seconds_var.set(str(settings.run_limit_seconds or 60))
+        self._load_points(settings.click_points or [])
+        self._refresh_enabled_fields()
+
+    def _refresh_preset_names(self) -> None:
+        names = sorted((self.settings.presets or {}).keys())
+        self.preset_combo.configure(values=names)
+        if names and not self.preset_name_var.get():
+            self.preset_name_var.set(names[0])
+
+    def _save_preset(self) -> None:
+        name = self.preset_name_var.get().strip()
+        if not name:
+            messagebox.showerror("预设名称为空", "请输入预设名称。")
+            return
+        settings = self._collect_settings()
+        presets = dict(settings.presets or {})
+        presets[name] = settings_to_preset(settings)
+        settings.presets = presets
+        self.settings = settings
+        save_settings(settings)
+        self._refresh_preset_names()
+        self.status_var.set(f"已保存预设：{name}")
+
+    def _load_preset(self) -> None:
+        name = self.preset_name_var.get().strip()
+        preset = (self.settings.presets or {}).get(name)
+        if not preset:
+            messagebox.showerror("预设不存在", "请选择已有预设。")
+            return
+        loaded = sanitize_settings(preset)
+        loaded.presets = self.settings.presets or {}
+        self._apply_settings(loaded)
+        self.status_var.set(f"已载入预设：{name}")
+
+    def _delete_preset(self) -> None:
+        name = self.preset_name_var.get().strip()
+        presets = dict(self.settings.presets or {})
+        if name not in presets:
+            messagebox.showerror("预设不存在", "请选择已有预设。")
+            return
+        presets.pop(name)
+        self.settings.presets = presets
+        save_settings(self.settings)
+        self.preset_name_var.set("")
+        self._refresh_preset_names()
+        self.status_var.set(f"已删除预设：{name}")
 
     def _on_close(self) -> None:
         self.clicker.stop()

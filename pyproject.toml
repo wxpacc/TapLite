@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=69", "packaging>=24.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taplite"
+version = "0.2.0"
+description = "面向 Windows 的免费轻量级连点器"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+    { name = "wxpacc" }
+]
+keywords = ["windows", "tkinter", "auto-clicker", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+build = [
+    "pyinstaller>=6",
+]
+
+[tool.setuptools]
+packages = ["taplite"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
