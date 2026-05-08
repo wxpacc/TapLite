@@ -19,6 +19,9 @@ dist/
 *.spec
 *.egg-info/
 
+# Release outputs
+# releases/ is intentionally not ignored; it stores user-facing builds.
+
 # Local runtime settings
 settings.json
 
