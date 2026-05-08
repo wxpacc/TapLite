@@ -5,6 +5,8 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 
 # Virtual environments
 .venv/
@@ -15,6 +17,7 @@ env/
 build/
 dist/
 *.spec
+*.egg-info/
 
 # Local runtime settings
 settings.json
