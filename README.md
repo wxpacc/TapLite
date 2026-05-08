@@ -4,6 +4,10 @@ TapLite 是一个面向 Windows 的轻量级连点器。项目使用 Python 标�
 
 TapLite 的目标是提供一个清晰、轻量、可维护的桌面工具，适用于普通窗口、无边框窗口和常见全屏场景。项目不会绕过反作弊系统，不会向游戏进程注入代码，也不会实现后台窗口隐藏点击。
 
+## 项目状态
+
+当前版本为 `0.1.0`，处于早期可用阶段。欢迎通过 Issue 反馈缺陷或提出改进建议。
+
 ## 功能特性
 
 - 支持左键、右键和中键。
@@ -24,6 +28,14 @@ python main.py
 如果目标游戏以管理员权限运行，请同样以管理员权限启动 TapLite。部分游戏或反作弊系统可能会屏蔽模拟输入，TapLite 不会尝试绕过这些限制。
 
 ## 测试
+
+首次开发建议安装开发依赖：
+
+```powershell
+python -m pip install -e ".[dev]"
+```
+
+然后运行：
 
 ```powershell
 python -m pytest
@@ -53,6 +65,8 @@ dist\TapLite.exe
 - 提交前运行测试和语法编译检查。
 - PR 保持聚焦，避免混入无关格式化、重构或生成文件。
 
+更多贡献约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。项目安全边界见 [SECURITY.md](SECURITY.md)。
+
 ## 代码与注释规范
 
 - 代码遵循 Python 社区常见风格，优先保持简单直接。
@@ -64,6 +78,7 @@ dist\TapLite.exe
 
 ```text
 TapLite/
+├── .github/
 ├── main.py
 ├── taplite/
 │   ├── clicker.py
@@ -73,6 +88,11 @@ TapLite/
 │   └── win_input.py
 ├── tests/
 ├── AGENTS.md
+├── CHANGELOG.md
+├── CODE_OF_CONDUCT.md
+├── CONTRIBUTING.md
+├── SECURITY.md
+├── pyproject.toml
 ├── README.md
 └── .gitignore
 ```

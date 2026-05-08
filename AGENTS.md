@@ -18,7 +18,7 @@ TapLite 是一个面向 Windows 的轻量级连点器，使用 Python 标准库�
 - 注释遵循行业内常见标准：只解释业务意图、平台限制或非显而易见的实现原因，避免重复代码本身。
 - Windows API 相关逻辑应隔离在 `taplite/win_input.py` 和 `taplite/hotkeys.py`，不要散落到 UI 层。
 - UI 层只负责展示、输入校验和状态同步；点击状态机应保留在 `taplite/clicker.py`。
-- 不引入第三方依赖，除非有明确收益并同步更新 README。
+- 不引入第三方运行时依赖，除非有明确收益并同步更新 README 和项目元数据。
 
 ## GitHub 工作流
 
