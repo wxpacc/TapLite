@@ -32,7 +32,15 @@ python -m pytest
 python -m compileall main.py taplite tests
 ```
 
-- Commit 信息使用简洁的祈使句或中文短句，能说明变更目的即可。
+- Commit 信息遵循 Conventional Commits 规范，格式为 `<type>(optional scope): <description>`。
+- 常用 type 包括：`feat`、`fix`、`docs`、`refactor`、`test`、`chore`、`build`、`ci`。
+- description 使用简洁英文或中文均可，但同一 PR 内保持一致。
+- PR 标题默认使用同样的 Conventional Commits 风格。
+- 如果存在破坏性变更，使用 `!` 标记，例如 `feat(settings)!: change config schema`，并在 PR 描述中说明迁移方式。
+- 示例：
+  - `feat(clicker): add fixed-position click mode`
+  - `fix(hotkeys): handle invalid hotkey strings`
+  - `docs: update Windows permission notes`
 
 ## 测试要求
 

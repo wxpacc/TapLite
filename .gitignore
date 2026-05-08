@@ -24,6 +24,7 @@ dist/
 
 # Local runtime settings
 settings.json
+data/
 
 # Editor and OS files
 .idea/
