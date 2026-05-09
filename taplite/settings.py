@@ -54,7 +54,8 @@ def default_settings() -> Settings:
     return Settings(click_points=[], presets={})
 
 
-def load_settings(path: Path = SETTINGS_FILE) -> Settings:
+def load_settings(path: Path | None = None) -> Settings:
+    path = path or SETTINGS_FILE
     source_path = path
     if path == SETTINGS_FILE and not source_path.exists() and LEGACY_SETTINGS_FILE.exists():
         source_path = LEGACY_SETTINGS_FILE
@@ -70,15 +71,27 @@ def load_settings(path: Path = SETTINGS_FILE) -> Settings:
     if not isinstance(data, dict):
         return default_settings()
 
-    return sanitize_settings(data)
+    settings = sanitize_settings(data)
+    if source_path == LEGACY_SETTINGS_FILE and path == SETTINGS_FILE:
+        _migrate_legacy_settings(settings)
+    return settings
 
 
-def save_settings(settings: Settings, path: Path = SETTINGS_FILE) -> None:
+def save_settings(settings: Settings, path: Path | None = None) -> None:
+    path = path or SETTINGS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(asdict(settings), indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+
+
+def _migrate_legacy_settings(settings: Settings) -> None:
+    try:
+        save_settings(settings, SETTINGS_FILE)
+        LEGACY_SETTINGS_FILE.unlink(missing_ok=True)
+    except OSError:
+        return
 
 
 def sanitize_settings(data: dict[str, Any]) -> Settings:

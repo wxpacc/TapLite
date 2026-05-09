@@ -35,6 +35,7 @@ python -m compileall main.py taplite tests
 - Commit 信息遵循 Conventional Commits 规范，格式为 `<type>(optional scope): <description>`。
 - 常用 type 包括：`feat`、`fix`、`docs`、`refactor`、`test`、`chore`、`build`、`ci`。
 - description 使用简洁英文或中文均可，但同一 PR 内保持一致。
+- 默认不添加 `Co-authored-by`、`Generated-by` 或其他额外署名 trailer，除非仓库维护者明确要求保留。
 - PR 标题默认使用同样的 Conventional Commits 风格。
 - 如果存在破坏性变更，使用 `!` 标记，例如 `feat(settings)!: change config schema`，并在 PR 描述中说明迁移方式。
 - 示例：

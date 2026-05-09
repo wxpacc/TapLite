@@ -230,7 +230,7 @@ class TapLiteApp(tk.Tk):
         ttk.Button(tab, text="保存预设", command=self._save_preset).grid(row=1, column=0, sticky="w", pady=(10, 0))
         ttk.Button(tab, text="载入预设", command=self._load_preset).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
         ttk.Button(tab, text="删除预设", command=self._delete_preset).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
-        ttk.Label(tab, text="预设只保存在本机 settings.json，不会进入版本控制。", style="Muted.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        ttk.Label(tab, text="预设只保存在本机 data/settings.json，不会进入版本控制。", style="Muted.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
         return tab
 
     def _add_config_widget(self, widget: tk.Widget) -> tk.Widget:
