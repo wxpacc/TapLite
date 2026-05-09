@@ -47,6 +47,7 @@ class Settings:
     random_offset_px: int = 0
     start_delay_seconds: int = 0
     run_limit_seconds: int = 0
+    show_running_overlay: bool = True
     presets: dict[str, dict[str, Any]] | None = None
 
 
@@ -131,6 +132,7 @@ def sanitize_settings(data: dict[str, Any]) -> Settings:
         random_offset_px=_non_negative_int(filtered.get("random_offset_px"), defaults.random_offset_px),
         start_delay_seconds=_start_delay(filtered.get("start_delay_seconds"), defaults.start_delay_seconds),
         run_limit_seconds=_non_negative_int(filtered.get("run_limit_seconds"), defaults.run_limit_seconds),
+        show_running_overlay=_bool(filtered.get("show_running_overlay"), defaults.show_running_overlay),
         presets=_presets(filtered.get("presets")),
     )
 

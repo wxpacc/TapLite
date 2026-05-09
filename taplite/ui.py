@@ -8,10 +8,86 @@ from tkinter import messagebox, simpledialog, ttk
 from .clicker import AutoClicker, ClickConfig, ClickEvent, ClickPoint
 from .hotkeys import HOTKEY_ACTION_STOP, HOTKEY_ACTION_TOGGLE, HotkeyManager, hotkey_to_vk
 from .settings import Settings, load_settings, save_settings, settings_to_preset, sanitize_settings
+from .tray import SystemTrayIcon, resolve_app_icon_path
 from .win_input import get_cursor_position, is_running_as_admin, send_click, set_cursor_position
 
 
 LOW_INTERVAL_WARNING_MS = 10
+OVERLAY_MARGIN_PX = 18
+
+
+class RunningOverlay:
+    def __init__(self, owner: tk.Tk) -> None:
+        self._owner = owner
+        self._window = tk.Toplevel(owner)
+        self._window.withdraw()
+        self._window.overrideredirect(True)
+        self._window.attributes("-topmost", True)
+        self._window.configure(background="#dbe4f0")
+
+        shell = tk.Frame(
+            self._window,
+            bg="#f8fafc",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground="#dbe4f0",
+            padx=14,
+            pady=12,
+        )
+        shell.pack()
+
+        self._title_label = tk.Label(
+            shell,
+            text="正在连点",
+            bg="#f8fafc",
+            fg="#0f172a",
+            font=("Segoe UI", 11, "bold"),
+            anchor="w",
+        )
+        self._title_label.pack(anchor="w")
+        self._hint_label = tk.Label(
+            shell,
+            text="按 F8 停止",
+            bg="#f8fafc",
+            fg="#475569",
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        self._hint_label.pack(anchor="w", pady=(4, 0))
+
+        self._owner.bind("<Configure>", self._on_owner_configure, add="+")
+
+    @property
+    def visible(self) -> bool:
+        return self._window.state() != "withdrawn"
+
+    def show(self, title: str, hint: str) -> None:
+        self._title_label.configure(text=title)
+        self._hint_label.configure(text=hint)
+        self._window.update_idletasks()
+        self._reposition()
+        self._window.deiconify()
+        self._window.lift()
+
+    def hide(self) -> None:
+        self._window.withdraw()
+
+    def destroy(self) -> None:
+        self._window.destroy()
+
+    def _on_owner_configure(self, _event: tk.Event) -> None:
+        if self.visible:
+            self._reposition()
+
+    def _reposition(self) -> None:
+        self._window.update_idletasks()
+        width = self._window.winfo_reqwidth()
+        height = self._window.winfo_reqheight()
+        screen_width = self._owner.winfo_screenwidth()
+        screen_height = self._owner.winfo_screenheight()
+        x = max(screen_width - width - OVERLAY_MARGIN_PX, 0)
+        y = max(screen_height - height - OVERLAY_MARGIN_PX, 0)
+        self._window.geometry(f"+{x}+{y}")
 
 
 class TapLiteApp(tk.Tk):
@@ -21,6 +97,7 @@ class TapLiteApp(tk.Tk):
         self.geometry("620x680")
         self.minsize(560, 560)
         self.resizable(True, True)
+        self._configure_app_icon()
         self._configure_style()
 
         self.settings = load_settings()
@@ -28,6 +105,10 @@ class TapLiteApp(tk.Tk):
         self.clicker = AutoClicker(send_click, set_cursor_position, self.event_queue)
         self.hotkeys = HotkeyManager(self._on_hotkey)
         self.config_widgets: list[tk.Widget] = []
+        self._overlay_title: str | None = None
+        self._exiting = False
+        self._tray_message_shown = False
+        self._tray_available = False
 
         self.interval_var = tk.StringVar(value=str(self.settings.interval_ms))
         self.button_var = tk.StringVar(value=self.settings.mouse_button)
@@ -48,11 +129,14 @@ class TapLiteApp(tk.Tk):
         self.start_delay_var = tk.StringVar(value=str(self.settings.start_delay_seconds))
         self.run_limit_var = tk.BooleanVar(value=self.settings.run_limit_seconds > 0)
         self.run_limit_seconds_var = tk.StringVar(value=str(self.settings.run_limit_seconds or 60))
+        self.show_running_overlay_var = tk.BooleanVar(value=self.settings.show_running_overlay)
         self.preset_name_var = tk.StringVar()
         self.status_var = tk.StringVar(value="就绪")
         self.count_var = tk.StringVar(value="0")
         self.notice_var = tk.StringVar(value=self._build_notice())
-        self.action_text_var = tk.StringVar(value="开始 (F6)")
+        self.action_text_var = tk.StringVar()
+        self.running_overlay = RunningOverlay(self)
+        self.tray_icon = self._build_tray_icon()
 
         self._build_ui()
         self._load_points(self.settings.click_points or [])
@@ -60,8 +144,23 @@ class TapLiteApp(tk.Tk):
         self._refresh_enabled_fields()
         self._refresh_preset_names()
         self._install_hotkeys()
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        if self.tray_icon is not None:
+            self._tray_available = self.tray_icon.start()
+            if self._tray_available:
+                self._sync_tray_state()
+            else:
+                self.status_var.set("托盘初始化失败，关闭窗口将直接退出。")
+        self.protocol("WM_DELETE_WINDOW", self._on_close_requested)
         self.after(100, self._poll_events)
+
+    def _configure_app_icon(self) -> None:
+        icon_path = resolve_app_icon_path()
+        if icon_path is None:
+            return
+        try:
+            self.iconbitmap(default=str(icon_path))
+        except tk.TclError:
+            return
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
@@ -74,6 +173,11 @@ class TapLiteApp(tk.Tk):
         style.configure("TLabelframe.Label", background="#f7f8fa", foreground="#374151")
         style.configure("TButton", padding=(10, 5))
         style.configure("Accent.TButton", padding=(14, 6))
+
+    def _build_tray_icon(self) -> SystemTrayIcon | None:
+        if sys.platform != "win32":
+            return None
+        return SystemTrayIcon()
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -96,8 +200,15 @@ class TapLiteApp(tk.Tk):
         actions = ttk.Frame(shell)
         actions.grid(row=2, column=0, sticky="ew", pady=(12, 0))
         actions.columnconfigure(0, weight=1)
-        ttk.Button(actions, textvariable=self.action_text_var, style="Accent.TButton", command=self._toggle_clicking).grid(row=0, column=0, sticky="ew")
-        ttk.Button(actions, text="停止 (F8)", command=self._stop_clicking).grid(row=0, column=1, sticky="e", padx=(8, 0))
+        ttk.Button(
+            actions,
+            textvariable=self.action_text_var,
+            style="Accent.TButton",
+            command=self._toggle_clicking,
+        ).grid(row=0, column=0, sticky="ew")
+        self.stop_button = ttk.Button(actions, command=self._stop_clicking)
+        self.stop_button.grid(row=0, column=1, sticky="e", padx=(8, 0))
+        self._refresh_hotkey_labels()
 
     def _build_header(self, parent: ttk.Frame) -> None:
         header = ttk.Frame(parent)
@@ -105,10 +216,27 @@ class TapLiteApp(tk.Tk):
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="TapLite", style="Title.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(header, text="状态").grid(row=0, column=1, sticky="e")
-        ttk.Label(header, textvariable=self.status_var, style="Value.TLabel").grid(row=0, column=2, sticky="e", padx=(8, 0))
+        ttk.Label(header, textvariable=self.status_var, style="Value.TLabel").grid(
+            row=0,
+            column=2,
+            sticky="e",
+            padx=(8, 0),
+        )
         ttk.Label(header, text="点击").grid(row=1, column=1, sticky="e", pady=(4, 0))
-        ttk.Label(header, textvariable=self.count_var, style="Value.TLabel").grid(row=1, column=2, sticky="e", padx=(8, 0), pady=(4, 0))
-        ttk.Label(header, textvariable=self.notice_var, style="Muted.TLabel", wraplength=560).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        ttk.Label(header, textvariable=self.count_var, style="Value.TLabel").grid(
+            row=1,
+            column=2,
+            sticky="e",
+            padx=(8, 0),
+            pady=(4, 0),
+        )
+        ttk.Label(header, textvariable=self.notice_var, style="Muted.TLabel", wraplength=560).grid(
+            row=2,
+            column=0,
+            columnspan=3,
+            sticky="ew",
+            pady=(6, 0),
+        )
 
     def _build_basic_tab(self, parent: ttk.Notebook) -> ttk.Frame:
         tab = ttk.Frame(parent, padding=12)
@@ -117,39 +245,121 @@ class TapLiteApp(tk.Tk):
 
         mode = ttk.LabelFrame(tab, text="点击模式", padding=10)
         mode.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
-        self._add_config_widget(ttk.Radiobutton(mode, text="单点", variable=self.click_mode_var, value="single_point", command=self._refresh_enabled_fields)).grid(row=0, column=0, sticky="w")
-        self._add_config_widget(ttk.Radiobutton(mode, text="多点", variable=self.click_mode_var, value="multi_point", command=self._refresh_enabled_fields)).grid(row=0, column=1, sticky="w", padx=(16, 0))
+        self._add_config_widget(
+            ttk.Radiobutton(
+                mode,
+                text="单点",
+                variable=self.click_mode_var,
+                value="single_point",
+                command=self._refresh_enabled_fields,
+            )
+        ).grid(row=0, column=0, sticky="w")
+        self._add_config_widget(
+            ttk.Radiobutton(
+                mode,
+                text="多点",
+                variable=self.click_mode_var,
+                value="multi_point",
+                command=self._refresh_enabled_fields,
+            )
+        ).grid(row=0, column=1, sticky="w", padx=(16, 0))
 
         click = ttk.LabelFrame(tab, text="点击设置", padding=10)
         click.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
         for column in range(6):
             click.columnconfigure(column, weight=1)
         self._add_config_widget(ttk.Label(click, text="间隔(ms)")).grid(row=0, column=0, sticky="w")
-        self._add_config_widget(ttk.Entry(click, textvariable=self.interval_var, width=9)).grid(row=0, column=1, sticky="w")
-        self._add_config_widget(ttk.Radiobutton(click, text="单击", variable=self.click_type_var, value="single")).grid(row=0, column=2, sticky="w")
-        self._add_config_widget(ttk.Radiobutton(click, text="双击", variable=self.click_type_var, value="double")).grid(row=0, column=3, sticky="w")
-        self._add_config_widget(ttk.Radiobutton(click, text="左键", variable=self.button_var, value="left")).grid(row=1, column=1, sticky="w", pady=(8, 0))
-        self._add_config_widget(ttk.Radiobutton(click, text="右键", variable=self.button_var, value="right")).grid(row=1, column=2, sticky="w", pady=(8, 0))
-        self._add_config_widget(ttk.Radiobutton(click, text="中键", variable=self.button_var, value="middle")).grid(row=1, column=3, sticky="w", pady=(8, 0))
+        self._add_config_widget(ttk.Entry(click, textvariable=self.interval_var, width=9)).grid(
+            row=0,
+            column=1,
+            sticky="w",
+        )
+        self._add_config_widget(
+            ttk.Radiobutton(click, text="单击", variable=self.click_type_var, value="single")
+        ).grid(row=0, column=2, sticky="w")
+        self._add_config_widget(
+            ttk.Radiobutton(click, text="双击", variable=self.click_type_var, value="double")
+        ).grid(row=0, column=3, sticky="w")
+        self._add_config_widget(
+            ttk.Radiobutton(click, text="左键", variable=self.button_var, value="left")
+        ).grid(row=1, column=1, sticky="w", pady=(8, 0))
+        self._add_config_widget(
+            ttk.Radiobutton(click, text="右键", variable=self.button_var, value="right")
+        ).grid(row=1, column=2, sticky="w", pady=(8, 0))
+        self._add_config_widget(
+            ttk.Radiobutton(click, text="中键", variable=self.button_var, value="middle")
+        ).grid(row=1, column=3, sticky="w", pady=(8, 0))
 
         repeat = ttk.LabelFrame(tab, text="重复", padding=10)
         repeat.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=(0, 6))
-        self._add_config_widget(ttk.Radiobutton(repeat, text="无限循环", variable=self.repeat_mode_var, value="infinite", command=self._refresh_enabled_fields)).grid(row=0, column=0, sticky="w")
-        self._add_config_widget(ttk.Radiobutton(repeat, text="指定次数/轮数", variable=self.repeat_mode_var, value="count", command=self._refresh_enabled_fields)).grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.repeat_count_entry = self._add_config_widget(ttk.Entry(repeat, textvariable=self.repeat_count_var, width=8))
+        self._add_config_widget(
+            ttk.Radiobutton(
+                repeat,
+                text="无限循环",
+                variable=self.repeat_mode_var,
+                value="infinite",
+                command=self._refresh_enabled_fields,
+            )
+        ).grid(row=0, column=0, sticky="w")
+        self._add_config_widget(
+            ttk.Radiobutton(
+                repeat,
+                text="指定次数/轮数",
+                variable=self.repeat_mode_var,
+                value="count",
+                command=self._refresh_enabled_fields,
+            )
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.repeat_count_entry = self._add_config_widget(
+            ttk.Entry(repeat, textvariable=self.repeat_count_var, width=8)
+        )
         self.repeat_count_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
 
         position = ttk.LabelFrame(tab, text="单点位置", padding=10)
         position.grid(row=2, column=2, columnspan=2, sticky="nsew", padx=(6, 0))
-        self._add_config_widget(ttk.Radiobutton(position, text="当前位置", variable=self.position_mode_var, value="current", command=self._refresh_enabled_fields)).grid(row=0, column=0, columnspan=5, sticky="w")
-        self._add_config_widget(ttk.Radiobutton(position, text="固定坐标", variable=self.position_mode_var, value="fixed", command=self._refresh_enabled_fields)).grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self._add_config_widget(ttk.Label(position, text="X")).grid(row=1, column=1, sticky="e", padx=(8, 2), pady=(8, 0))
-        self.fixed_x_entry = self._add_config_widget(ttk.Entry(position, textvariable=self.fixed_x_var, width=6))
+        self._add_config_widget(
+            ttk.Radiobutton(
+                position,
+                text="当前位置",
+                variable=self.position_mode_var,
+                value="current",
+                command=self._refresh_enabled_fields,
+            )
+        ).grid(row=0, column=0, columnspan=5, sticky="w")
+        self._add_config_widget(
+            ttk.Radiobutton(
+                position,
+                text="固定坐标",
+                variable=self.position_mode_var,
+                value="fixed",
+                command=self._refresh_enabled_fields,
+            )
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self._add_config_widget(ttk.Label(position, text="X")).grid(
+            row=1,
+            column=1,
+            sticky="e",
+            padx=(8, 2),
+            pady=(8, 0),
+        )
+        self.fixed_x_entry = self._add_config_widget(
+            ttk.Entry(position, textvariable=self.fixed_x_var, width=6)
+        )
         self.fixed_x_entry.grid(row=1, column=2, sticky="w", pady=(8, 0))
-        self._add_config_widget(ttk.Label(position, text="Y")).grid(row=1, column=3, sticky="e", padx=(6, 2), pady=(8, 0))
-        self.fixed_y_entry = self._add_config_widget(ttk.Entry(position, textvariable=self.fixed_y_var, width=6))
+        self._add_config_widget(ttk.Label(position, text="Y")).grid(
+            row=1,
+            column=3,
+            sticky="e",
+            padx=(6, 2),
+            pady=(8, 0),
+        )
+        self.fixed_y_entry = self._add_config_widget(
+            ttk.Entry(position, textvariable=self.fixed_y_var, width=6)
+        )
         self.fixed_y_entry.grid(row=1, column=4, sticky="w", pady=(8, 0))
-        self.capture_button = self._add_config_widget(ttk.Button(position, text="读取坐标", command=self._capture_position))
+        self.capture_button = self._add_config_widget(
+            ttk.Button(position, text="读取坐标", command=self._capture_position)
+        )
         self.capture_button.grid(row=2, column=0, columnspan=5, sticky="w", pady=(8, 0))
         return tab
 
@@ -187,38 +397,106 @@ class TapLiteApp(tk.Tk):
 
     def _build_advanced_tab(self, parent: ttk.Notebook) -> ttk.Frame:
         tab = ttk.Frame(parent, padding=12)
+
         random_frame = ttk.LabelFrame(tab, text="随机化", padding=10)
         random_frame.pack(fill="x", pady=(0, 10))
-        self._add_config_widget(ttk.Checkbutton(random_frame, text="随机间隔", variable=self.random_interval_var, command=self._refresh_enabled_fields)).grid(row=0, column=0, sticky="w")
-        self.random_min_entry = self._add_config_widget(ttk.Entry(random_frame, textvariable=self.random_interval_min_var, width=8))
+        self._add_config_widget(
+            ttk.Checkbutton(
+                random_frame,
+                text="随机间隔",
+                variable=self.random_interval_var,
+                command=self._refresh_enabled_fields,
+            )
+        ).grid(row=0, column=0, sticky="w")
+        self.random_min_entry = self._add_config_widget(
+            ttk.Entry(random_frame, textvariable=self.random_interval_min_var, width=8)
+        )
         self.random_min_entry.grid(row=0, column=1, padx=(8, 2))
         ttk.Label(random_frame, text="-").grid(row=0, column=2)
-        self.random_max_entry = self._add_config_widget(ttk.Entry(random_frame, textvariable=self.random_interval_max_var, width=8))
+        self.random_max_entry = self._add_config_widget(
+            ttk.Entry(random_frame, textvariable=self.random_interval_max_var, width=8)
+        )
         self.random_max_entry.grid(row=0, column=3, padx=(2, 4))
         ttk.Label(random_frame, text="ms").grid(row=0, column=4, sticky="w")
-        self._add_config_widget(ttk.Checkbutton(random_frame, text="随机坐标偏移", variable=self.random_offset_var, command=self._refresh_enabled_fields)).grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.random_offset_entry = self._add_config_widget(ttk.Entry(random_frame, textvariable=self.random_offset_px_var, width=8))
+        self._add_config_widget(
+            ttk.Checkbutton(
+                random_frame,
+                text="随机坐标偏移",
+                variable=self.random_offset_var,
+                command=self._refresh_enabled_fields,
+            )
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.random_offset_entry = self._add_config_widget(
+            ttk.Entry(random_frame, textvariable=self.random_offset_px_var, width=8)
+        )
         self.random_offset_entry.grid(row=1, column=1, sticky="w", padx=(8, 2), pady=(8, 0))
         ttk.Label(random_frame, text="px").grid(row=1, column=2, sticky="w", pady=(8, 0))
 
         run_frame = ttk.LabelFrame(tab, text="运行控制", padding=10)
         run_frame.pack(fill="x")
         self._add_config_widget(ttk.Label(run_frame, text="启动倒计时")).grid(row=0, column=0, sticky="w")
-        self.start_delay_combo = self._add_config_widget(ttk.Combobox(run_frame, textvariable=self.start_delay_var, values=("0", "1", "3", "5"), state="readonly", width=8))
+        self.start_delay_combo = self._add_config_widget(
+            ttk.Combobox(
+                run_frame,
+                textvariable=self.start_delay_var,
+                values=("0", "1", "3", "5"),
+                state="readonly",
+                width=8,
+            )
+        )
         self.start_delay_combo.grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Label(run_frame, text="秒").grid(row=0, column=2, sticky="w", padx=(4, 0))
-        self._add_config_widget(ttk.Checkbutton(run_frame, text="运行时限", variable=self.run_limit_var, command=self._refresh_enabled_fields)).grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.run_limit_entry = self._add_config_widget(ttk.Entry(run_frame, textvariable=self.run_limit_seconds_var, width=8))
+        self._add_config_widget(
+            ttk.Checkbutton(
+                run_frame,
+                text="运行时限",
+                variable=self.run_limit_var,
+                command=self._refresh_enabled_fields,
+            )
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.run_limit_entry = self._add_config_widget(
+            ttk.Entry(run_frame, textvariable=self.run_limit_seconds_var, width=8)
+        )
         self.run_limit_entry.grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(8, 0))
         ttk.Label(run_frame, text="秒").grid(row=1, column=2, sticky="w", padx=(4, 0), pady=(8, 0))
 
         hotkeys = ttk.LabelFrame(tab, text="热键", padding=10)
         hotkeys.pack(fill="x", pady=(10, 0))
         ttk.Label(hotkeys, text="开始/停止").grid(row=0, column=0, sticky="w")
-        ttk.Entry(hotkeys, textvariable=self.toggle_hotkey_var, width=8).grid(row=0, column=1, sticky="w", padx=(8, 16))
+        ttk.Entry(hotkeys, textvariable=self.toggle_hotkey_var, width=8).grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=(8, 16),
+        )
         ttk.Label(hotkeys, text="紧急停止").grid(row=0, column=2, sticky="w")
-        ttk.Entry(hotkeys, textvariable=self.stop_hotkey_var, width=8).grid(row=0, column=3, sticky="w", padx=(8, 16))
+        ttk.Entry(hotkeys, textvariable=self.stop_hotkey_var, width=8).grid(
+            row=0,
+            column=3,
+            sticky="w",
+            padx=(8, 16),
+        )
         ttk.Button(hotkeys, text="应用", command=self._install_hotkeys).grid(row=0, column=4, sticky="e")
+
+        overlay = ttk.LabelFrame(tab, text="提示", padding=10)
+        overlay.pack(fill="x", pady=(10, 0))
+        self._add_config_widget(
+            ttk.Checkbutton(
+                overlay,
+                text="运行时显示右下角提示",
+                variable=self.show_running_overlay_var,
+                command=self._on_overlay_toggle,
+            )
+        ).grid(row=0, column=0, sticky="w")
+
+        tray_frame = ttk.LabelFrame(tab, text="后台运行", padding=10)
+        tray_frame.pack(fill="x", pady=(10, 0))
+        ttk.Label(
+            tray_frame,
+            text="关闭窗口后保留在系统托盘，可从托盘恢复、开始/停止和退出。",
+            style="Muted.TLabel",
+            wraplength=520,
+        ).grid(row=0, column=0, sticky="w")
         return tab
 
     def _build_presets_tab(self, parent: ttk.Notebook) -> ttk.Frame:
@@ -228,9 +506,25 @@ class TapLiteApp(tk.Tk):
         self.preset_combo = ttk.Combobox(tab, textvariable=self.preset_name_var, values=(), width=28)
         self.preset_combo.grid(row=0, column=1, sticky="ew", padx=(8, 0))
         ttk.Button(tab, text="保存预设", command=self._save_preset).grid(row=1, column=0, sticky="w", pady=(10, 0))
-        ttk.Button(tab, text="载入预设", command=self._load_preset).grid(row=1, column=1, sticky="w", padx=(8, 0), pady=(10, 0))
-        ttk.Button(tab, text="删除预设", command=self._delete_preset).grid(row=1, column=2, sticky="w", padx=(8, 0), pady=(10, 0))
-        ttk.Label(tab, text="预设只保存在本机 data/settings.json，不会进入版本控制。", style="Muted.TLabel").grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        ttk.Button(tab, text="载入预设", command=self._load_preset).grid(
+            row=1,
+            column=1,
+            sticky="w",
+            padx=(8, 0),
+            pady=(10, 0),
+        )
+        ttk.Button(tab, text="删除预设", command=self._delete_preset).grid(
+            row=1,
+            column=2,
+            sticky="w",
+            padx=(8, 0),
+            pady=(10, 0),
+        )
+        ttk.Label(
+            tab,
+            text="预设仅保存在本机 data/settings.json，不会进入版本控制。",
+            style="Muted.TLabel",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(12, 0))
         return tab
 
     def _add_config_widget(self, widget: tk.Widget) -> tk.Widget:
@@ -244,6 +538,15 @@ class TapLiteApp(tk.Tk):
             return "若目标游戏以管理员权限运行，请也用管理员权限启动 TapLite。"
         return "管理员模式运行中。部分游戏或反作弊可能会屏蔽模拟输入。"
 
+    def _refresh_hotkey_labels(self) -> None:
+        toggle_hotkey = self.toggle_hotkey_var.get().strip().upper() or "F6"
+        stop_hotkey = self.stop_hotkey_var.get().strip().upper() or "F8"
+        self.stop_button.configure(text=f"停止 ({stop_hotkey})")
+        if self.clicker.is_running:
+            self.action_text_var.set(f"停止 ({toggle_hotkey})")
+        else:
+            self.action_text_var.set(f"开始 ({toggle_hotkey})")
+
     def _set_config_widgets_state(self, state: str) -> None:
         for widget in self.config_widgets:
             try:
@@ -252,23 +555,30 @@ class TapLiteApp(tk.Tk):
                 pass
 
     def _refresh_running_state(self) -> None:
+        self._refresh_hotkey_labels()
         if self.clicker.is_running:
-            self.action_text_var.set("停止 (F6)")
             self._set_config_widgets_state("disabled")
         else:
-            self.action_text_var.set("开始 (F6)")
             self._set_config_widgets_state("normal")
             self._refresh_enabled_fields()
+            self._hide_overlay()
+        self._sync_tray_state()
 
     def _refresh_enabled_fields(self) -> None:
         if self.clicker.is_running:
             return
         repeat_state = "normal" if self.repeat_mode_var.get() == "count" else "disabled"
-        fixed_state = "normal" if self.position_mode_var.get() == "fixed" and self.click_mode_var.get() == "single_point" else "disabled"
+        fixed_state = (
+            "normal"
+            if self.position_mode_var.get() == "fixed" and self.click_mode_var.get() == "single_point"
+            else "disabled"
+        )
         self.repeat_count_entry.configure(state=repeat_state)
         self.fixed_x_entry.configure(state=fixed_state)
         self.fixed_y_entry.configure(state=fixed_state)
-        self.capture_button.configure(state="normal" if self.click_mode_var.get() == "single_point" else "disabled")
+        self.capture_button.configure(
+            state="normal" if self.click_mode_var.get() == "single_point" else "disabled"
+        )
         self.random_min_entry.configure(state="normal" if self.random_interval_var.get() else "disabled")
         self.random_max_entry.configure(state="normal" if self.random_interval_var.get() else "disabled")
         self.random_offset_entry.configure(state="normal" if self.random_offset_var.get() else "disabled")
@@ -314,7 +624,13 @@ class TapLiteApp(tk.Tk):
         new_y = simpledialog.askinteger("编辑 Y", "Y 坐标", initialvalue=int(y), minvalue=0, parent=self)
         if new_y is None:
             return
-        new_wait = simpledialog.askinteger("编辑等待", "等待毫秒，0 表示使用全局间隔", initialvalue=int(wait_ms), minvalue=0, parent=self)
+        new_wait = simpledialog.askinteger(
+            "编辑等待",
+            "等待毫秒，0 表示使用全局间隔",
+            initialvalue=int(wait_ms),
+            minvalue=0,
+            parent=self,
+        )
         if new_wait is None:
             return
         self.points_tree.item(item, values=(new_x, new_y, new_wait))
@@ -415,7 +731,7 @@ class TapLiteApp(tk.Tk):
         if config is None or not self._confirm_low_interval(config):
             return
         if config.repeat_mode == "infinite":
-            self.status_var.set("准备开始，F8 可紧急停止")
+            self.status_var.set(f"准备开始，{self._stop_hint_text()}。")
         self.clicker.start(config)
         self._refresh_running_state()
 
@@ -437,6 +753,62 @@ class TapLiteApp(tk.Tk):
             messagebox.showerror("热键错误", f"{exc}\n当前支持 F1-F12、Esc、Space、Pause。")
             return
         self.hotkeys.start(self.toggle_hotkey_var.get(), self.stop_hotkey_var.get())
+        self._refresh_hotkey_labels()
+        if self._overlay_title:
+            self._show_overlay(self._overlay_title)
+
+    def _on_overlay_toggle(self) -> None:
+        if self.show_running_overlay_var.get() and self._overlay_title:
+            self.running_overlay.show(self._overlay_title, self._stop_hint_text())
+        else:
+            self.running_overlay.hide()
+
+    def _stop_hint_text(self) -> str:
+        stop_hotkey = self.stop_hotkey_var.get().strip().upper() or "F8"
+        return f"按 {stop_hotkey} 停止"
+
+    def _show_overlay(self, title: str) -> None:
+        self._overlay_title = title
+        if self.show_running_overlay_var.get():
+            self.running_overlay.show(title, self._stop_hint_text())
+
+    def _hide_overlay(self) -> None:
+        self._overlay_title = None
+        self.running_overlay.hide()
+
+    def _toggle_window_visibility(self) -> None:
+        if not self.winfo_viewable():
+            self._show_window()
+        else:
+            self._hide_to_tray()
+
+    def _show_window(self) -> None:
+        self.deiconify()
+        self.lift()
+        self.focus_force()
+        self._sync_tray_state()
+
+    def _hide_to_tray(self) -> None:
+        if not self._tray_available or self.tray_icon is None:
+            self._close_app()
+            return
+        self.withdraw()
+        self._sync_tray_state()
+        if not self._tray_message_shown:
+            self.status_var.set("已最小化到系统托盘")
+            self._tray_message_shown = True
+
+    def _exit_from_tray(self) -> None:
+        self._exiting = True
+        self._close_app()
+
+    def _sync_tray_state(self) -> None:
+        if not self._tray_available or self.tray_icon is None:
+            return
+        self.tray_icon.update(
+            window_visible=bool(self.winfo_viewable()),
+            clicker_running=self.clicker.is_running,
+        )
 
     def _poll_events(self) -> None:
         while True:
@@ -450,18 +822,34 @@ class TapLiteApp(tk.Tk):
             if action.startswith("error:"):
                 self.status_var.set(f"热键注册失败：{action[6:]}")
 
+        if self.tray_icon is not None:
+            for event in self.tray_icon.drain_events():
+                if event == "toggle_window":
+                    self._toggle_window_visibility()
+                elif event == "toggle_clicker":
+                    self._toggle_clicking()
+                elif event == "exit":
+                    self._exit_from_tray()
+                elif event:
+                    self._tray_available = False
+                    self.status_var.set(f"托盘初始化失败：{event}")
+
         self.after(100, self._poll_events)
 
     def _handle_click_event(self, event: ClickEvent) -> None:
         if event.kind == "countdown":
-            self.status_var.set(f"{event.message} 秒后开始")
+            message = f"{event.message} 秒后开始"
+            self.status_var.set(message)
+            self._show_overlay(message)
         elif event.kind == "started":
-            self.status_var.set("运行中，F8 可紧急停止")
+            self.status_var.set(f"运行中，{self._stop_hint_text()}。")
             self._refresh_running_state()
+            self._show_overlay("正在连点")
         elif event.kind == "clicked":
             self.count_var.set(str(event.count))
         elif event.kind == "limit_reached":
             self.status_var.set("已达到运行时限")
+            self._hide_overlay()
         elif event.kind == "stopped":
             if self.status_var.get() != "已达到运行时限":
                 self.status_var.set("已停止")
@@ -496,6 +884,7 @@ class TapLiteApp(tk.Tk):
             random_offset_px=config.random_offset_px,
             start_delay_seconds=config.start_delay_seconds,
             run_limit_seconds=config.run_limit_seconds,
+            show_running_overlay=self.show_running_overlay_var.get(),
             presets=self.settings.presets or {},
         )
 
@@ -519,8 +908,11 @@ class TapLiteApp(tk.Tk):
         self.start_delay_var.set(str(settings.start_delay_seconds))
         self.run_limit_var.set(settings.run_limit_seconds > 0)
         self.run_limit_seconds_var.set(str(settings.run_limit_seconds or 60))
+        self.show_running_overlay_var.set(settings.show_running_overlay)
         self._load_points(settings.click_points or [])
+        self._refresh_hotkey_labels()
         self._refresh_enabled_fields()
+        self._on_overlay_toggle()
 
     def _refresh_preset_names(self) -> None:
         names = sorted((self.settings.presets or {}).keys())
@@ -566,11 +958,25 @@ class TapLiteApp(tk.Tk):
         self._refresh_preset_names()
         self.status_var.set(f"已删除预设：{name}")
 
-    def _on_close(self) -> None:
+    def _on_close_requested(self) -> None:
+        if self._exiting:
+            self._close_app()
+            return
+        if not self._tray_available or self.tray_icon is None:
+            self._close_app()
+            return
+        self._hide_to_tray()
+
+    def _close_app(self) -> None:
+        self._exiting = True
         self.clicker.stop()
         self.clicker.wait(timeout=1)
         self.hotkeys.stop()
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+        self._hide_overlay()
         save_settings(self._collect_settings())
+        self.running_overlay.destroy()
         self.destroy()
 
 
