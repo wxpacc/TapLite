@@ -13,6 +13,7 @@ def test_load_defaults_when_file_missing(tmp_path: Path) -> None:
     assert settings.stop_hotkey == "F8"
     assert settings.click_mode == "single_point"
     assert settings.click_points == []
+    assert settings.show_running_overlay is True
 
 
 def test_save_creates_parent_directory(tmp_path: Path) -> None:
@@ -59,6 +60,7 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
         random_offset_px=2,
         start_delay_seconds=3,
         run_limit_seconds=60,
+        show_running_overlay=False,
         presets={"test": {"interval_ms": 50}},
     )
 
@@ -76,6 +78,7 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
     assert loaded.random_offset_px == 2
     assert loaded.start_delay_seconds == 3
     assert loaded.run_limit_seconds == 60
+    assert loaded.show_running_overlay is False
     assert loaded.presets is not None
     assert loaded.presets["test"]["interval_ms"] == 50
 
@@ -126,7 +129,8 @@ def test_load_resets_invalid_number_values(tmp_path: Path) -> None:
           "random_interval_max_ms": 10,
           "random_offset_px": -2,
           "start_delay_seconds": 2,
-          "run_limit_seconds": -1
+          "run_limit_seconds": -1,
+          "show_running_overlay": "yes"
         }
         """,
         encoding="utf-8",
@@ -143,6 +147,7 @@ def test_load_resets_invalid_number_values(tmp_path: Path) -> None:
     assert loaded.random_offset_px == 0
     assert loaded.start_delay_seconds == 0
     assert loaded.run_limit_seconds == 0
+    assert loaded.show_running_overlay is True
 
 
 def test_load_validates_click_points(tmp_path: Path) -> None:
@@ -187,6 +192,7 @@ def test_load_keeps_valid_values_when_unknown_keys_exist(tmp_path: Path) -> None
           "random_offset_px": 3,
           "start_delay_seconds": 5,
           "run_limit_seconds": 90,
+          "show_running_overlay": false,
           "unknown": true
         }
         """,
@@ -212,3 +218,26 @@ def test_load_keeps_valid_values_when_unknown_keys_exist(tmp_path: Path) -> None
     assert loaded.random_offset_px == 3
     assert loaded.start_delay_seconds == 5
     assert loaded.run_limit_seconds == 90
+    assert loaded.show_running_overlay is False
+
+
+def test_presets_keep_running_overlay_flag(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "presets": {
+            "overlay-off": {
+              "interval_ms": 25,
+              "show_running_overlay": false
+            }
+          }
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_settings(path)
+
+    assert loaded.presets is not None
+    assert loaded.presets["overlay-off"]["show_running_overlay"] is False
