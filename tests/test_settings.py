@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from taplite.clicker import ClickPoint
+from taplite import settings as settings_module
 from taplite.settings import Settings, load_settings, save_settings
 
 
@@ -21,6 +22,25 @@ def test_save_creates_parent_directory(tmp_path: Path) -> None:
 
     assert path.exists()
     assert load_settings(path).interval_ms == 42
+
+
+def test_load_migrates_legacy_settings_file(tmp_path: Path, monkeypatch) -> None:
+    project_root = tmp_path
+    settings_file = project_root / "data" / "settings.json"
+    legacy_file = project_root / "settings.json"
+    legacy_file.write_text('{"interval_ms": 42}', encoding="utf-8")
+
+    monkeypatch.setattr(settings_module, "PROJECT_ROOT", project_root)
+    monkeypatch.setattr(settings_module, "DATA_DIR", project_root / "data")
+    monkeypatch.setattr(settings_module, "SETTINGS_FILE", settings_file)
+    monkeypatch.setattr(settings_module, "LEGACY_SETTINGS_FILE", legacy_file)
+
+    loaded = load_settings()
+
+    assert loaded.interval_ms == 42
+    assert settings_file.exists()
+    assert not legacy_file.exists()
+    assert load_settings(settings_file).interval_ms == 42
 
 
 def test_save_and_load_round_trip(tmp_path: Path) -> None:
