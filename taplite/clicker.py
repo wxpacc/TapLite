@@ -132,7 +132,8 @@ class AutoClicker:
                     self.events.put(ClickEvent("limit_reached", self.count))
                     break
 
-                for point in self._iter_points(config):
+                points = self._iter_points(config)
+                for index, point in enumerate(points):
                     if self._stop_event.is_set() or self._is_run_limit_reached(config, started_at):
                         if self._is_run_limit_reached(config, started_at):
                             self.events.put(ClickEvent("limit_reached", self.count))
@@ -146,6 +147,10 @@ class AutoClicker:
                         count = self._count
                     self.events.put(ClickEvent("clicked", count))
 
+                    is_last_point_in_round = index == len(points) - 1
+                    is_final_round = target_rounds is not None and completed_rounds + 1 >= target_rounds
+                    if is_last_point_in_round and is_final_round:
+                        continue
                     if self._wait_between_clicks(config, point):
                         break
 
@@ -177,7 +182,7 @@ class AutoClicker:
             offset = config.random_offset_px
             x += self._random_int(-offset, offset)
             y += self._random_int(-offset, offset)
-        self._move_func(max(x, 0), max(y, 0))
+        self._move_func(x, y)
 
     def _wait_between_clicks(self, config: ClickConfig, point: ClickPoint) -> bool:
         wait_ms = point.wait_ms or config.interval_ms

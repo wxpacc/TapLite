@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from ctypes import Structure, Union, WinDLL, byref, c_int, c_long, c_ulong, c_void_p, sizeof
+from ctypes import Structure, Union, WinDLL, byref, c_int, c_long, c_uint, c_ulong, c_void_p, sizeof
 import ctypes
 import sys
 from typing import Literal
@@ -54,6 +54,15 @@ BUTTON_FLAGS: dict[MouseButton, tuple[int, int]] = {
     "right": (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
     "middle": (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
 }
+
+
+if sys.platform == "win32" and user32 is not None:
+    user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
+    user32.GetCursorPos.restype = c_int
+    user32.SetCursorPos.argtypes = [c_int, c_int]
+    user32.SetCursorPos.restype = c_int
+    user32.SendInput.argtypes = [c_uint, ctypes.POINTER(INPUT), c_int]
+    user32.SendInput.restype = c_uint
 
 
 def ensure_windows() -> None:

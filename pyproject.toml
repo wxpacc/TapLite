@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "taplite"
-version = "0.3.0"
+version = "0.3.1"
 description = "面向 Windows 的免费轻量级连点器"
 readme = "README.md"
 requires-python = ">=3.10"

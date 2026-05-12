@@ -5,20 +5,20 @@
 TapLite is a lightweight Windows auto clicker built with the Python standard library:
 
 - `tkinter` for the desktop UI
-- Windows `SendInput` for mouse events
+- Windows `SendInput` for mouse input
 - `RegisterHotKey` for global hotkeys
 - local `json` settings storage
 
-TapLite is designed for normal desktop use on Windows. It does not bypass anti-cheat systems, inject into game processes, or provide hidden background clicking for other windows.
+TapLite is intended for normal Windows desktop use. It does not bypass anti-cheat systems, inject into other processes, or provide hidden background automation.
 
 ## Download
 
-- Latest release page: https://github.com/wxpacc/TapLite/releases/tag/v0.3.0
-- Direct download: https://github.com/wxpacc/TapLite/releases/download/v0.3.0/TapLite.exe
+- Latest release page: https://github.com/wxpacc/TapLite/releases/tag/v0.3.1
+- Direct download: https://github.com/wxpacc/TapLite/releases/download/v0.3.1/TapLite.exe
 
 ## Version
 
-Current version: `v0.3.0`
+Current version: `v0.3.1`
 
 ## Features
 
@@ -27,14 +27,22 @@ Current version: `v0.3.0`
 - Millisecond interval control
 - Infinite loop or fixed repeat count
 - Current cursor position or fixed screen coordinates
+- Guided coordinate capture for fixed-position and multi-point setup
 - Multi-point click list with per-point wait time
 - Random interval and random offset options
 - Start delay and run time limit
 - Running-state overlay in the bottom-right corner
 - System tray integration
 - Single-instance startup behavior
+- Custom global hotkeys for start/stop and emergency stop
 - Local presets saved in `data/settings.json`
-- Default global hotkeys: `F6` start/stop, `F8` emergency stop
+
+## Local Data
+
+- TapLite stores settings and presets only in the local `data/settings.json` file beside the app.
+- It does not upload configuration to any server.
+- It does not write registry startup items, services, or other persistent background components.
+- To remove the app and all local data, delete the TapLite folder directly. No extra residue is left behind.
 
 ## Run from Source
 

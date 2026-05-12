@@ -22,7 +22,8 @@ TapLite/
 - `releases/TapLite.exe` 是面向用户的发布产物，不作为源码结构的一部分。
 - `build/`、`dist/`、`*.spec`、缓存目录、根目录旧版 `settings.json` 和 `data/` 都属于本地生成内容。
 - 运行时数据统一保存在软件所在目录的 `data/settings.json`。
-- 打包为 exe 后，`data/` 位于 `TapLite.exe` 同级目录；源码运行时则位于项目根目录。
+- 打包为 `exe` 后，`data/` 位于 `TapLite.exe` 同级目录；源码运行时则位于项目根目录。
+- 项目不会额外写入注册表常驻项、系统服务或其他隐藏残留；如果要卸载并清除数据，直接删除 TapLite 文件夹即可。
 
 构建发布文件：
 

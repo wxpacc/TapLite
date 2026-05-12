@@ -140,7 +140,7 @@ def test_load_resets_invalid_number_values(tmp_path: Path) -> None:
 
     assert loaded.interval_ms == 100
     assert loaded.repeat_count == 100
-    assert loaded.fixed_x == 0
+    assert loaded.fixed_x == -10
     assert loaded.fixed_y == 0
     assert loaded.random_interval_min_ms == 100
     assert loaded.random_interval_max_ms == 150
@@ -167,7 +167,7 @@ def test_load_validates_click_points(tmp_path: Path) -> None:
 
     loaded = load_settings(path)
 
-    assert loaded.click_points == [ClickPoint(1, 2, 3)]
+    assert loaded.click_points == [ClickPoint(1, 2, 3), ClickPoint(-1, 2, 0)]
 
 
 def test_load_keeps_valid_values_when_unknown_keys_exist(tmp_path: Path) -> None:
@@ -241,3 +241,57 @@ def test_presets_keep_running_overlay_flag(tmp_path: Path) -> None:
 
     assert loaded.presets is not None
     assert loaded.presets["overlay-off"]["show_running_overlay"] is False
+
+
+def test_load_resets_invalid_hotkeys_to_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "toggle_hotkey": "Ctrl+F6",
+          "stop_hotkey": "BadKey"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_settings(path)
+
+    assert loaded.toggle_hotkey == "F6"
+    assert loaded.stop_hotkey == "F8"
+
+
+def test_load_resets_duplicate_hotkeys_to_distinct_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "toggle_hotkey": "F6",
+          "stop_hotkey": "f6"
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_settings(path)
+
+    assert loaded.toggle_hotkey == "F6"
+    assert loaded.stop_hotkey == "F8"
+
+
+def test_load_keeps_negative_click_point_coordinates(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        """
+        {
+          "click_points": [
+            {"x": -100, "y": 220, "wait_ms": 3}
+          ]
+        }
+        """,
+        encoding="utf-8",
+    )
+
+    loaded = load_settings(path)
+
+    assert loaded.click_points == [ClickPoint(-100, 220, 3)]
