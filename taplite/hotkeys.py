@@ -51,21 +51,35 @@ class HotkeyManager:
         self._events: queue.Queue[str] = queue.Queue()
         self._registered_ids: list[int] = []
         self._thread_id = 0
+        self._current_hotkeys: tuple[str, str] | None = None
+        self._startup_error: str | None = None
 
-    def start(self, toggle_hotkey: str, stop_hotkey: str) -> None:
+    def start(self, toggle_hotkey: str, stop_hotkey: str) -> str | None:
         if sys.platform != "win32" or user32 is None:
-            return
+            return None
+        requested = (normalize_hotkey(toggle_hotkey), normalize_hotkey(stop_hotkey))
+        if self._thread and self._thread.is_alive() and requested == self._current_hotkeys:
+            return None
+        if not self._is_only_remapping_current_hotkeys(requested):
+            error = self._probe_hotkeys_available(requested)
+            if error is not None:
+                return error
         self.stop()
         self._stop_event.clear()
         self._ready.clear()
+        self._startup_error = None
         self._thread = threading.Thread(
             target=self._message_loop,
-            args=(toggle_hotkey, stop_hotkey),
+            args=(requested,),
             name="TapLiteHotkeys",
             daemon=True,
         )
         self._thread.start()
         self._ready.wait(timeout=1)
+        if self._startup_error is not None:
+            return self._startup_error
+        self._current_hotkeys = requested
+        return None
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -76,6 +90,7 @@ class HotkeyManager:
             thread.join(timeout=1)
         self._thread = None
         self._thread_id = 0
+        self._current_hotkeys = None
 
     def drain(self) -> list[str]:
         actions: list[str] = []
@@ -85,11 +100,33 @@ class HotkeyManager:
             except queue.Empty:
                 return actions
 
-    def _message_loop(self, toggle_hotkey: str, stop_hotkey: str) -> None:
+    def _is_only_remapping_current_hotkeys(self, requested: tuple[str, str]) -> bool:
+        current = self._current_hotkeys
+        if current is None or requested == current:
+            return False
+        return set(requested) == set(current)
+
+    def _probe_hotkeys_available(self, hotkeys: tuple[str, str]) -> str | None:
+        assert user32 is not None
+        registered_ids: list[int] = []
+        try:
+            for hotkey_id, hotkey in enumerate(hotkeys, start=101):
+                vk = hotkey_to_vk(hotkey)
+                if not user32.RegisterHotKey(None, hotkey_id, 0, vk):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                registered_ids.append(hotkey_id)
+            return None
+        except Exception as exc:
+            return str(exc)
+        finally:
+            for hotkey_id in registered_ids:
+                user32.UnregisterHotKey(None, hotkey_id)
+
+    def _message_loop(self, hotkeys_requested: tuple[str, str]) -> None:
         self._thread_id = ctypes.windll.kernel32.GetCurrentThreadId()
         hotkeys = {
-            1: (normalize_hotkey(toggle_hotkey), HOTKEY_ACTION_TOGGLE),
-            2: (normalize_hotkey(stop_hotkey), HOTKEY_ACTION_STOP),
+            1: (hotkeys_requested[0], HOTKEY_ACTION_TOGGLE),
+            2: (hotkeys_requested[1], HOTKEY_ACTION_STOP),
         }
         try:
             for hotkey_id, (hotkey, _) in hotkeys.items():
@@ -108,10 +145,10 @@ class HotkeyManager:
                     action = hotkeys.get(int(msg.wParam), ("", ""))[1]
                     if action:
                         self._events.put(action)
-                        self._callback(action)
                 user32.TranslateMessage(byref(msg))
                 user32.DispatchMessageW(byref(msg))
         except Exception as exc:
+            self._startup_error = str(exc)
             self._events.put(f"error:{exc}")
             self._ready.set()
         finally:

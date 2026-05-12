@@ -8,7 +8,7 @@ from tkinter import messagebox, simpledialog, ttk
 from typing import Callable, Literal
 
 from .clicker import AutoClicker, ClickConfig, ClickEvent, ClickPoint
-from .hotkeys import HOTKEY_ACTION_STOP, HOTKEY_ACTION_TOGGLE, HotkeyManager, hotkey_to_vk
+from .hotkeys import HOTKEY_ACTION_STOP, HOTKEY_ACTION_TOGGLE, HotkeyManager, hotkey_to_vk, normalize_hotkey
 from .settings import Settings, load_settings, save_settings, settings_to_preset, sanitize_settings
 from .tray import SystemTrayIcon, resolve_app_icon_path
 from .win_input import get_cursor_position, is_running_as_admin, send_click, set_cursor_position
@@ -20,11 +20,39 @@ CAPTURE_CARD_OFFSET_X = 18
 CAPTURE_CARD_OFFSET_Y = 22
 
 
+def _geometry_with_position(width: int, height: int, x: int, y: int) -> str:
+    return f"{width}x{height}{x:+d}{y:+d}"
+
+
+def _position_only_geometry(x: int, y: int) -> str:
+    return f"{x:+d}{y:+d}"
+
+
+def _parse_int_or_default(value: str, default: int) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def _read_pointer_position(owner: tk.Misc) -> tuple[int, int] | None:
+    try:
+        return get_cursor_position()
+    except Exception:
+        pass
+    try:
+        return int(owner.winfo_pointerx()), int(owner.winfo_pointery())
+    except tk.TclError:
+        return None
+
+
 def compute_capture_card_position(
     cursor_x: int,
     cursor_y: int,
     card_width: int,
     card_height: int,
+    screen_x: int,
+    screen_y: int,
     screen_width: int,
     screen_height: int,
     offset_x: int = CAPTURE_CARD_OFFSET_X,
@@ -32,9 +60,9 @@ def compute_capture_card_position(
 ) -> tuple[int, int]:
     x = cursor_x + offset_x
     y = cursor_y + offset_y
-    max_x = max(screen_width - card_width - 8, 0)
-    max_y = max(screen_height - card_height - 8, 0)
-    return max(min(x, max_x), 0), max(min(y, max_y), 0)
+    max_x = max(screen_x + screen_width - card_width - 8, screen_x)
+    max_y = max(screen_y + screen_height - card_height - 8, screen_y)
+    return max(min(x, max_x), screen_x), max(min(y, max_y), screen_y)
 
 
 CaptureKind = Literal["single", "multi"]
@@ -136,7 +164,7 @@ class RunningOverlay:
         screen_height = self._owner.winfo_screenheight()
         x = max(screen_width - width - OVERLAY_MARGIN_PX, 0)
         y = max(screen_height - height - OVERLAY_MARGIN_PX, 0)
-        self._window.geometry(f"+{x}+{y}")
+        self._window.geometry(_position_only_geometry(x, y))
 
 
 class PointCaptureOverlay:
@@ -219,7 +247,7 @@ class PointCaptureOverlay:
         screen_width = self._owner.winfo_screenwidth()
         screen_height = self._owner.winfo_screenheight()
         self._title_label.configure(text=title)
-        self._window.geometry(f"{screen_width}x{screen_height}+0+0")
+        self._window.geometry(_geometry_with_position(screen_width, screen_height, 0, 0))
         self._window.deiconify()
         self._window.lift()
         self._card.deiconify()
@@ -248,12 +276,12 @@ class PointCaptureOverlay:
         if not self._visible:
             self._poll_after_id = None
             return
-        try:
-            x, y = get_cursor_position()
-        except Exception:
-            self.hide()
-            self._on_cancel()
+        position = _read_pointer_position(self._owner)
+        if position is None:
+            self._coords_label.configure(text="等待点击确认位置")
+            self._schedule_poll()
             return
+        x, y = position
         self._current_position = (x, y)
         self._coords_label.configure(text=f"X={x}, Y={y}")
         self._card.update_idletasks()
@@ -264,10 +292,12 @@ class PointCaptureOverlay:
             y,
             card_width,
             card_height,
+            0,
+            0,
             self._owner.winfo_screenwidth(),
             self._owner.winfo_screenheight(),
         )
-        self._card.geometry(f"+{card_x}+{card_y}")
+        self._card.geometry(_position_only_geometry(card_x, card_y))
         self._schedule_poll()
 
     def _confirm(self, event: tk.Event) -> None:
@@ -306,6 +336,7 @@ class TapLiteApp(tk.Tk):
         self._exiting = False
         self._tray_message_shown = False
         self._tray_available = False
+        self._last_hotkey_error: str | None = None
 
         self.interval_var = tk.StringVar(value=str(self.settings.interval_ms))
         self.button_var = tk.StringVar(value=self.settings.mouse_button)
@@ -737,8 +768,8 @@ class TapLiteApp(tk.Tk):
         return "管理员模式运行中。部分游戏或反作弊可能会屏蔽模拟输入。"
 
     def _refresh_hotkey_labels(self) -> None:
-        toggle_hotkey = self.toggle_hotkey_var.get().strip().upper() or "F6"
-        stop_hotkey = self.stop_hotkey_var.get().strip().upper() or "F8"
+        toggle_hotkey = normalize_hotkey(self.toggle_hotkey_var.get() or "F6")
+        stop_hotkey = normalize_hotkey(self.stop_hotkey_var.get() or "F8")
         self.stop_button.configure(text=f"停止 ({stop_hotkey})")
         if self.clicker.is_running:
             self.action_text_var.set(f"停止 ({toggle_hotkey})")
@@ -795,6 +826,17 @@ class TapLiteApp(tk.Tk):
             points.append(ClickPoint(int(x), int(y), int(wait_ms)))
         return points
 
+    def _read_default_point_wait(self) -> int | None:
+        try:
+            interval_ms = int(self.interval_var.get())
+        except ValueError:
+            messagebox.showerror("输入错误", "点击间隔必须是整数。")
+            return None
+        if interval_ms < 1:
+            messagebox.showerror("输入错误", "点击间隔必须大于 0。")
+            return None
+        return interval_ms
+
     def _add_current_point(self) -> None:
         wait_ms = self._read_default_point_wait()
         if wait_ms is None:
@@ -813,10 +855,10 @@ class TapLiteApp(tk.Tk):
         if item is None:
             return
         x, y, wait_ms = self.points_tree.item(item, "values")
-        new_x = simpledialog.askinteger("编辑 X", "X 坐标", initialvalue=int(x), minvalue=0, parent=self)
+        new_x = simpledialog.askinteger("编辑 X", "X 坐标", initialvalue=int(x), parent=self)
         if new_x is None:
             return
-        new_y = simpledialog.askinteger("编辑 Y", "Y 坐标", initialvalue=int(y), minvalue=0, parent=self)
+        new_y = simpledialog.askinteger("编辑 Y", "Y 坐标", initialvalue=int(y), parent=self)
         if new_y is None:
             return
         new_wait = simpledialog.askinteger(
@@ -848,24 +890,13 @@ class TapLiteApp(tk.Tk):
     def _capture_position(self) -> None:
         self._start_capture_mode(CaptureRequest(kind="single"))
 
-    def _read_default_point_wait(self) -> int | None:
-        try:
-            interval_ms = int(self.interval_var.get())
-        except ValueError:
-            messagebox.showerror("输入错误", "点击间隔必须是整数。")
-            return None
-        if interval_ms < 1:
-            messagebox.showerror("输入错误", "点击间隔必须大于 0。")
-            return None
-        return interval_ms
-
     def _start_capture_mode(self, request: CaptureRequest) -> None:
         if sys.platform != "win32":
             messagebox.showerror("当前平台不支持", "取点模式仅支持 Windows。")
             return
         self._stop_capture_mode(update_status=False)
         self._capture_request = request
-        self._capture_overlay_was_visible = bool(self._overlay_title and self.show_running_overlay_var.get())
+        self._capture_overlay_was_visible = bool(self._overlay_title and self.running_overlay.visible)
         self.running_overlay.hide()
         title = "读取坐标" if request.kind == "single" else "添加位置"
         self.capture_overlay.show(title)
@@ -875,7 +906,7 @@ class TapLiteApp(tk.Tk):
         self._capture_request = None
         if self.capture_overlay.visible:
             self.capture_overlay.hide()
-        if self._capture_overlay_was_visible and self._overlay_title:
+        if self._capture_overlay_was_visible and self._overlay_title and self.show_running_overlay_var.get():
             self.running_overlay.show(self._overlay_title, self._stop_hint_text())
         self._capture_overlay_was_visible = False
         if update_status and not self.clicker.is_running:
@@ -884,12 +915,12 @@ class TapLiteApp(tk.Tk):
     def _handle_capture_confirm(self, x: int, y: int) -> None:
         request = self._capture_request
         self._capture_request = None
-        if self._capture_overlay_was_visible and self._overlay_title:
+        if self._capture_overlay_was_visible and self._overlay_title and self.show_running_overlay_var.get():
             self.running_overlay.show(self._overlay_title, self._stop_hint_text())
         self._capture_overlay_was_visible = False
         if request is None:
             return
-        result = apply_capture_request(request, max(x, 0), max(y, 0))
+        result = apply_capture_request(request, x, y)
         if result.fixed_position is not None:
             fixed_x, fixed_y = result.fixed_position
             self.fixed_x_var.set(str(fixed_x))
@@ -906,36 +937,84 @@ class TapLiteApp(tk.Tk):
     def _handle_capture_cancel(self) -> None:
         self._stop_capture_mode(update_status=True)
 
-    def _read_config(self) -> ClickConfig | None:
+    def _read_runtime_config(self) -> ClickConfig | None:
         try:
             interval_ms = int(self.interval_var.get())
-            repeat_count = int(self.repeat_count_var.get())
-            fixed_x = int(self.fixed_x_var.get())
-            fixed_y = int(self.fixed_y_var.get())
-            random_min = int(self.random_interval_min_var.get())
-            random_max = int(self.random_interval_max_var.get())
-            random_offset = int(self.random_offset_px_var.get())
-            start_delay = int(self.start_delay_var.get())
-            run_limit = int(self.run_limit_seconds_var.get()) if self.run_limit_var.get() else 0
         except ValueError:
-            messagebox.showerror("输入错误", "间隔、次数、坐标和高级参数必须是整数。")
+            messagebox.showerror("输入错误", "点击间隔必须是整数。")
+            return None
+        if interval_ms < 1:
+            messagebox.showerror("输入错误", "点击间隔必须大于 0。")
             return None
 
-        if interval_ms < 1 or repeat_count < 1:
-            messagebox.showerror("输入错误", "点击间隔和指定次数必须大于 0。")
+        repeat_mode = self.repeat_mode_var.get()
+        repeat_count = 1
+        if repeat_mode == "count":
+            try:
+                repeat_count = int(self.repeat_count_var.get())
+            except ValueError:
+                messagebox.showerror("输入错误", "指定次数必须是整数。")
+                return None
+            if repeat_count < 1:
+                messagebox.showerror("输入错误", "指定次数必须大于 0。")
+                return None
+
+        click_mode = self.click_mode_var.get()
+        position_mode = self.position_mode_var.get()
+        fixed_x = 0
+        fixed_y = 0
+        if click_mode == "single_point" and position_mode == "fixed":
+            try:
+                fixed_x = int(self.fixed_x_var.get())
+                fixed_y = int(self.fixed_y_var.get())
+            except ValueError:
+                messagebox.showerror("输入错误", "固定坐标必须是整数。")
+                return None
+
+        random_interval_enabled = self.random_interval_var.get()
+        random_min = self.settings.random_interval_min_ms
+        random_max = self.settings.random_interval_max_ms
+        if random_interval_enabled:
+            try:
+                random_min = int(self.random_interval_min_var.get())
+                random_max = int(self.random_interval_max_var.get())
+            except ValueError:
+                messagebox.showerror("输入错误", "随机间隔范围必须是整数。")
+                return None
+            if random_min < 1 or random_max < random_min:
+                messagebox.showerror("输入错误", "随机间隔范围必须有效。")
+                return None
+
+        random_offset_enabled = self.random_offset_var.get()
+        random_offset_px = 0
+        if random_offset_enabled:
+            try:
+                random_offset_px = int(self.random_offset_px_var.get())
+            except ValueError:
+                messagebox.showerror("输入错误", "随机坐标偏移必须是整数。")
+                return None
+            if random_offset_px < 0:
+                messagebox.showerror("输入错误", "随机坐标偏移必须是非负整数。")
+                return None
+
+        start_delay = _parse_int_or_default(self.start_delay_var.get(), self.settings.start_delay_seconds)
+        if start_delay not in {0, 1, 3, 5}:
+            messagebox.showerror("输入错误", "启动倒计时仅支持 0、1、3、5 秒。")
             return None
-        if fixed_x < 0 or fixed_y < 0 or random_offset < 0:
-            messagebox.showerror("输入错误", "坐标和随机偏移必须是非负整数。")
-            return None
-        if random_min < 1 or random_max < random_min:
-            messagebox.showerror("输入错误", "随机间隔范围必须有效。")
-            return None
-        if run_limit < 0:
-            messagebox.showerror("输入错误", "运行时限必须是非负整数。")
-            return None
+
+        run_limit = 0
+        if self.run_limit_var.get():
+            try:
+                run_limit = int(self.run_limit_seconds_var.get())
+            except ValueError:
+                messagebox.showerror("输入错误", "运行时限必须是整数。")
+                return None
+            if run_limit < 0:
+                messagebox.showerror("输入错误", "运行时限必须是非负整数。")
+                return None
 
         points = self._read_points()
-        if self.click_mode_var.get() == "multi_point" and not points:
+        if click_mode == "multi_point" and not points:
             messagebox.showerror("输入错误", "多点模式至少需要一个点位。")
             return None
 
@@ -943,18 +1022,18 @@ class TapLiteApp(tk.Tk):
             interval_ms=interval_ms,
             mouse_button=self.button_var.get(),  # type: ignore[arg-type]
             click_type=self.click_type_var.get(),  # type: ignore[arg-type]
-            repeat_mode=self.repeat_mode_var.get(),  # type: ignore[arg-type]
+            repeat_mode=repeat_mode,  # type: ignore[arg-type]
             repeat_count=repeat_count,
-            position_mode=self.position_mode_var.get(),  # type: ignore[arg-type]
+            position_mode=position_mode,  # type: ignore[arg-type]
             fixed_x=fixed_x,
             fixed_y=fixed_y,
-            click_mode=self.click_mode_var.get(),  # type: ignore[arg-type]
+            click_mode=click_mode,  # type: ignore[arg-type]
             click_points=points,
-            random_interval_enabled=self.random_interval_var.get(),
+            random_interval_enabled=random_interval_enabled,
             random_interval_min_ms=random_min,
             random_interval_max_ms=random_max,
-            random_offset_enabled=self.random_offset_var.get(),
-            random_offset_px=random_offset,
+            random_offset_enabled=random_offset_enabled,
+            random_offset_px=random_offset_px,
             start_delay_seconds=start_delay,
             run_limit_seconds=run_limit,
         )
@@ -974,7 +1053,7 @@ class TapLiteApp(tk.Tk):
             self.clicker.stop()
             self._refresh_running_state()
             return
-        config = self._read_config()
+        config = self._read_runtime_config()
         if config is None or not self._confirm_low_interval(config):
             return
         if config.repeat_mode == "infinite":
@@ -988,19 +1067,29 @@ class TapLiteApp(tk.Tk):
 
     def _on_hotkey(self, action: str) -> None:
         if action == HOTKEY_ACTION_TOGGLE:
-            self.after(0, self._toggle_clicking)
+            self._toggle_clicking()
         elif action == HOTKEY_ACTION_STOP:
-            self.after(0, self._stop_clicking)
+            self._stop_clicking()
 
     def _install_hotkeys(self) -> None:
+        toggle_hotkey = normalize_hotkey(self.toggle_hotkey_var.get())
+        stop_hotkey = normalize_hotkey(self.stop_hotkey_var.get())
         try:
-            hotkey_to_vk(self.toggle_hotkey_var.get())
-            hotkey_to_vk(self.stop_hotkey_var.get())
+            hotkey_to_vk(toggle_hotkey)
+            hotkey_to_vk(stop_hotkey)
         except ValueError as exc:
             messagebox.showerror("热键错误", f"{exc}\n当前支持 F1-F12、Esc、Space、Pause。")
             return
-        self.hotkeys.start(self.toggle_hotkey_var.get(), self.stop_hotkey_var.get())
+        if toggle_hotkey == stop_hotkey:
+            messagebox.showerror("热键错误", "开始/停止热键和紧急停止热键不能相同。")
+            return
+        error = self.hotkeys.start(toggle_hotkey, stop_hotkey)
         self._refresh_hotkey_labels()
+        if error:
+            self._last_hotkey_error = error
+            self.status_var.set(f"热键注册失败：{error}")
+            return
+        self._last_hotkey_error = None
         if self._overlay_title:
             self._show_overlay(self._overlay_title)
 
@@ -1013,7 +1102,7 @@ class TapLiteApp(tk.Tk):
             self.running_overlay.hide()
 
     def _stop_hint_text(self) -> str:
-        stop_hotkey = self.stop_hotkey_var.get().strip().upper() or "F8"
+        stop_hotkey = normalize_hotkey(self.stop_hotkey_var.get() or "F8")
         return f"按 {stop_hotkey} 停止"
 
     def _show_overlay(self, title: str) -> None:
@@ -1069,7 +1158,10 @@ class TapLiteApp(tk.Tk):
 
         for action in self.hotkeys.drain():
             if action.startswith("error:"):
+                self._last_hotkey_error = action[6:]
                 self.status_var.set(f"热键注册失败：{action[6:]}")
+            elif action:
+                self._on_hotkey(action)
 
         if self.tray_icon is not None:
             for event in self.tray_icon.drain_events():
@@ -1111,32 +1203,47 @@ class TapLiteApp(tk.Tk):
             messagebox.showerror("点击失败", event.message)
 
     def _collect_settings(self) -> Settings:
-        config = self._read_config()
-        if config is None:
-            return self.settings
-        return Settings(
-            interval_ms=config.interval_ms,
-            mouse_button=config.mouse_button,
-            click_type=config.click_type,
-            repeat_mode=config.repeat_mode,
-            repeat_count=config.repeat_count,
-            position_mode=config.position_mode,
-            fixed_x=config.fixed_x,
-            fixed_y=config.fixed_y,
-            toggle_hotkey=self.toggle_hotkey_var.get().strip().upper(),
-            stop_hotkey=self.stop_hotkey_var.get().strip().upper(),
-            click_mode=config.click_mode,
-            click_points=config.click_points or [],
-            random_interval_enabled=config.random_interval_enabled,
-            random_interval_min_ms=config.random_interval_min_ms,
-            random_interval_max_ms=config.random_interval_max_ms,
-            random_offset_enabled=config.random_offset_enabled,
-            random_offset_px=config.random_offset_px,
-            start_delay_seconds=config.start_delay_seconds,
-            run_limit_seconds=config.run_limit_seconds,
-            show_running_overlay=self.show_running_overlay_var.get(),
-            presets=self.settings.presets or {},
-        )
+        previous = self.settings
+        points = self._read_points()
+        raw_settings = {
+            "interval_ms": max(_parse_int_or_default(self.interval_var.get(), previous.interval_ms), 1),
+            "mouse_button": self.button_var.get(),
+            "click_type": self.click_type_var.get(),
+            "repeat_mode": self.repeat_mode_var.get(),
+            "repeat_count": max(_parse_int_or_default(self.repeat_count_var.get(), previous.repeat_count), 1),
+            "position_mode": self.position_mode_var.get(),
+            "fixed_x": _parse_int_or_default(self.fixed_x_var.get(), previous.fixed_x),
+            "fixed_y": _parse_int_or_default(self.fixed_y_var.get(), previous.fixed_y),
+            "toggle_hotkey": self.toggle_hotkey_var.get().strip() or previous.toggle_hotkey,
+            "stop_hotkey": self.stop_hotkey_var.get().strip() or previous.stop_hotkey,
+            "click_mode": self.click_mode_var.get(),
+            "click_points": [{"x": point.x, "y": point.y, "wait_ms": point.wait_ms} for point in points],
+            "random_interval_enabled": self.random_interval_var.get(),
+            "random_interval_min_ms": max(
+                _parse_int_or_default(self.random_interval_min_var.get(), previous.random_interval_min_ms),
+                1,
+            ),
+            "random_interval_max_ms": max(
+                _parse_int_or_default(self.random_interval_max_var.get(), previous.random_interval_max_ms),
+                1,
+            ),
+            "random_offset_enabled": self.random_offset_var.get(),
+            "random_offset_px": max(
+                _parse_int_or_default(self.random_offset_px_var.get(), previous.random_offset_px),
+                0,
+            ),
+            "start_delay_seconds": _parse_int_or_default(self.start_delay_var.get(), previous.start_delay_seconds),
+            "run_limit_seconds": (
+                max(_parse_int_or_default(self.run_limit_seconds_var.get(), previous.run_limit_seconds), 0)
+                if self.run_limit_var.get()
+                else 0
+            ),
+            "show_running_overlay": self.show_running_overlay_var.get(),
+            "presets": previous.presets or {},
+        }
+        collected = sanitize_settings(raw_settings)
+        collected.presets = previous.presets or {}
+        return collected
 
     def _apply_settings(self, settings: Settings) -> None:
         self.interval_var.set(str(settings.interval_ms))
@@ -1176,7 +1283,7 @@ class TapLiteApp(tk.Tk):
             messagebox.showerror("预设名称为空", "请输入预设名称。")
             return
         settings = self._collect_settings()
-        presets = dict(settings.presets or {})
+        presets = dict(self.settings.presets or {})
         presets[name] = settings_to_preset(settings)
         settings.presets = presets
         self.settings = settings

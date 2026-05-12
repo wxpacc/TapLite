@@ -7,6 +7,7 @@ import sys
 from typing import Any
 
 from .clicker import ClickPoint
+from .hotkeys import hotkey_to_vk, normalize_hotkey
 
 
 APP_NAME = "TapLite"
@@ -112,6 +113,11 @@ def sanitize_settings(data: dict[str, Any]) -> Settings:
         min_interval = defaults.random_interval_min_ms
         max_interval = defaults.random_interval_max_ms
 
+    toggle_hotkey = _hotkey(filtered.get("toggle_hotkey"), defaults.toggle_hotkey)
+    stop_hotkey = _hotkey(filtered.get("stop_hotkey"), defaults.stop_hotkey)
+    if toggle_hotkey == stop_hotkey:
+        stop_hotkey = defaults.stop_hotkey if toggle_hotkey != defaults.stop_hotkey else defaults.toggle_hotkey
+
     return Settings(
         interval_ms=_positive_int(filtered.get("interval_ms"), defaults.interval_ms),
         mouse_button=_choice(filtered.get("mouse_button"), MOUSE_BUTTONS, defaults.mouse_button),
@@ -119,10 +125,10 @@ def sanitize_settings(data: dict[str, Any]) -> Settings:
         repeat_mode=_choice(filtered.get("repeat_mode"), REPEAT_MODES, defaults.repeat_mode),
         repeat_count=_positive_int(filtered.get("repeat_count"), defaults.repeat_count),
         position_mode=_choice(filtered.get("position_mode"), POSITION_MODES, defaults.position_mode),
-        fixed_x=_non_negative_int(filtered.get("fixed_x"), defaults.fixed_x),
-        fixed_y=_non_negative_int(filtered.get("fixed_y"), defaults.fixed_y),
-        toggle_hotkey=_non_empty_string(filtered.get("toggle_hotkey"), defaults.toggle_hotkey),
-        stop_hotkey=_non_empty_string(filtered.get("stop_hotkey"), defaults.stop_hotkey),
+        fixed_x=_int_value(filtered.get("fixed_x"), defaults.fixed_x),
+        fixed_y=_int_value(filtered.get("fixed_y"), defaults.fixed_y),
+        toggle_hotkey=toggle_hotkey,
+        stop_hotkey=stop_hotkey,
         click_mode=_choice(filtered.get("click_mode"), CLICK_MODES, defaults.click_mode),
         click_points=_click_points(filtered.get("click_points")),
         random_interval_enabled=_bool(filtered.get("random_interval_enabled"), defaults.random_interval_enabled),
@@ -155,8 +161,21 @@ def _non_negative_int(value: Any, default: int) -> int:
     return value if isinstance(value, int) and value >= 0 else default
 
 
+def _int_value(value: Any, default: int) -> int:
+    return value if isinstance(value, int) else default
+
+
 def _non_empty_string(value: Any, default: str) -> str:
     return value if isinstance(value, str) and value.strip() else default
+
+
+def _hotkey(value: Any, default: str) -> str:
+    hotkey = _non_empty_string(value, default)
+    try:
+        hotkey_to_vk(hotkey)
+    except ValueError:
+        return default
+    return normalize_hotkey(hotkey)
 
 
 def _bool(value: Any, default: bool) -> bool:
@@ -179,8 +198,6 @@ def _click_points(value: Any) -> list[ClickPoint]:
         y = item.get("y")
         wait_ms = item.get("wait_ms", 0)
         if not isinstance(x, int) or not isinstance(y, int):
-            continue
-        if x < 0 or y < 0:
             continue
         points.append(ClickPoint(x=x, y=y, wait_ms=_non_negative_int(wait_ms, 0)))
     return points

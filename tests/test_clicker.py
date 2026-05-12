@@ -123,7 +123,7 @@ def test_random_interval_uses_configured_range() -> None:
 
     clicker.start(
         make_config(
-            repeat_count=1,
+            repeat_count=2,
             random_interval_enabled=True,
             random_interval_min_ms=25,
             random_interval_max_ms=40,
@@ -155,3 +155,15 @@ def test_start_delay_emits_countdown_before_clicking() -> None:
     kinds = [events.get_nowait().kind for _ in range(events.qsize())]
     assert kinds[0] == "countdown"
     assert "started" in kinds
+
+
+def test_clicker_finishes_without_waiting_after_final_round() -> None:
+    clicker = AutoClicker(lambda _button, _clicks: None, lambda _x, _y: None)
+
+    started_at = time.monotonic()
+    clicker.start(make_config(interval_ms=200, repeat_count=1))
+    clicker.wait(timeout=0.05)
+    elapsed = time.monotonic() - started_at
+
+    assert not clicker.is_running
+    assert elapsed < 0.1
