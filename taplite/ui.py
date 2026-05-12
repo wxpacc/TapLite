@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import queue
 import sys
 import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
+from typing import Callable, Literal
 
 from .clicker import AutoClicker, ClickConfig, ClickEvent, ClickPoint
 from .hotkeys import HOTKEY_ACTION_STOP, HOTKEY_ACTION_TOGGLE, HotkeyManager, hotkey_to_vk
@@ -14,6 +16,53 @@ from .win_input import get_cursor_position, is_running_as_admin, send_click, set
 
 LOW_INTERVAL_WARNING_MS = 10
 OVERLAY_MARGIN_PX = 18
+CAPTURE_CARD_OFFSET_X = 18
+CAPTURE_CARD_OFFSET_Y = 22
+
+
+def compute_capture_card_position(
+    cursor_x: int,
+    cursor_y: int,
+    card_width: int,
+    card_height: int,
+    screen_width: int,
+    screen_height: int,
+    offset_x: int = CAPTURE_CARD_OFFSET_X,
+    offset_y: int = CAPTURE_CARD_OFFSET_Y,
+) -> tuple[int, int]:
+    x = cursor_x + offset_x
+    y = cursor_y + offset_y
+    max_x = max(screen_width - card_width - 8, 0)
+    max_y = max(screen_height - card_height - 8, 0)
+    return max(min(x, max_x), 0), max(min(y, max_y), 0)
+
+
+CaptureKind = Literal["single", "multi"]
+
+
+@dataclass(slots=True)
+class CaptureRequest:
+    kind: CaptureKind
+    wait_ms: int = 0
+
+
+@dataclass(slots=True)
+class CaptureApplyResult:
+    fixed_position: tuple[int, int] | None = None
+    point: ClickPoint | None = None
+    status_message: str = ""
+
+
+def apply_capture_request(request: CaptureRequest, x: int, y: int) -> CaptureApplyResult:
+    if request.kind == "single":
+        return CaptureApplyResult(
+            fixed_position=(x, y),
+            status_message=f"已读取坐标 X={x}, Y={y}",
+        )
+    return CaptureApplyResult(
+        point=ClickPoint(x=x, y=y, wait_ms=max(request.wait_ms, 0)),
+        status_message=f"已添加点 X={x}, Y={y}",
+    )
 
 
 class RunningOverlay:
@@ -90,6 +139,152 @@ class RunningOverlay:
         self._window.geometry(f"+{x}+{y}")
 
 
+class PointCaptureOverlay:
+    def __init__(
+        self,
+        owner: tk.Tk,
+        on_confirm: Callable[[int, int], None],
+        on_cancel: Callable[[], None],
+    ) -> None:
+        self._owner = owner
+        self._on_confirm = on_confirm
+        self._on_cancel = on_cancel
+        self._visible = False
+        self._poll_after_id: str | None = None
+        self._current_position = (0, 0)
+
+        self._window = tk.Toplevel(owner)
+        self._window.withdraw()
+        self._window.overrideredirect(True)
+        self._window.attributes("-topmost", True)
+        self._window.configure(bg="#0f172a", cursor="crosshair")
+        try:
+            self._window.attributes("-alpha", 0.08)
+        except tk.TclError:
+            pass
+
+        self._window.bind("<Button-1>", self._confirm)
+        self._window.bind("<Button-3>", self._cancel)
+        self._window.bind("<Escape>", self._cancel)
+
+        self._card = tk.Toplevel(owner)
+        self._card.withdraw()
+        self._card.overrideredirect(True)
+        self._card.attributes("-topmost", True)
+        self._card.configure(bg="#dbe4f0")
+
+        shell = tk.Frame(
+            self._card,
+            bg="#f8fafc",
+            bd=1,
+            highlightthickness=1,
+            highlightbackground="#dbe4f0",
+            padx=14,
+            pady=12,
+        )
+        shell.pack()
+        self._title_label = tk.Label(
+            shell,
+            text="取点中",
+            bg="#f8fafc",
+            fg="#0f172a",
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        )
+        self._title_label.pack(anchor="w")
+        self._coords_label = tk.Label(
+            shell,
+            text="X=0, Y=0",
+            bg="#f8fafc",
+            fg="#1f2937",
+            font=("Consolas", 10),
+            anchor="w",
+        )
+        self._coords_label.pack(anchor="w", pady=(4, 0))
+        self._hint_label = tk.Label(
+            shell,
+            text="左键确认，右键或 Esc 取消",
+            bg="#f8fafc",
+            fg="#475569",
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        self._hint_label.pack(anchor="w", pady=(4, 0))
+
+    @property
+    def visible(self) -> bool:
+        return self._visible
+
+    def show(self, title: str) -> None:
+        screen_width = self._owner.winfo_screenwidth()
+        screen_height = self._owner.winfo_screenheight()
+        self._title_label.configure(text=title)
+        self._window.geometry(f"{screen_width}x{screen_height}+0+0")
+        self._window.deiconify()
+        self._window.lift()
+        self._card.deiconify()
+        self._card.lift()
+        self._visible = True
+        self._window.focus_force()
+        self._schedule_poll()
+
+    def hide(self) -> None:
+        self._visible = False
+        if self._poll_after_id is not None:
+            self._owner.after_cancel(self._poll_after_id)
+            self._poll_after_id = None
+        self._window.withdraw()
+        self._card.withdraw()
+
+    def destroy(self) -> None:
+        self.hide()
+        self._card.destroy()
+        self._window.destroy()
+
+    def _schedule_poll(self) -> None:
+        self._poll_after_id = self._owner.after(30, self._poll_cursor)
+
+    def _poll_cursor(self) -> None:
+        if not self._visible:
+            self._poll_after_id = None
+            return
+        try:
+            x, y = get_cursor_position()
+        except Exception:
+            self.hide()
+            self._on_cancel()
+            return
+        self._current_position = (x, y)
+        self._coords_label.configure(text=f"X={x}, Y={y}")
+        self._card.update_idletasks()
+        card_width = self._card.winfo_reqwidth()
+        card_height = self._card.winfo_reqheight()
+        card_x, card_y = compute_capture_card_position(
+            x,
+            y,
+            card_width,
+            card_height,
+            self._owner.winfo_screenwidth(),
+            self._owner.winfo_screenheight(),
+        )
+        self._card.geometry(f"+{card_x}+{card_y}")
+        self._schedule_poll()
+
+    def _confirm(self, event: tk.Event) -> None:
+        if not self._visible:
+            return
+        x = int(getattr(event, "x_root", self._current_position[0]))
+        y = int(getattr(event, "y_root", self._current_position[1]))
+        self.hide()
+        self._on_confirm(x, y)
+
+    def _cancel(self, _event: tk.Event | None = None) -> None:
+        if not self._visible:
+            return
+        self.hide()
+        self._on_cancel()
+
+
 class TapLiteApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -106,6 +301,8 @@ class TapLiteApp(tk.Tk):
         self.hotkeys = HotkeyManager(self._on_hotkey)
         self.config_widgets: list[tk.Widget] = []
         self._overlay_title: str | None = None
+        self._capture_request: CaptureRequest | None = None
+        self._capture_overlay_was_visible = False
         self._exiting = False
         self._tray_message_shown = False
         self._tray_available = False
@@ -136,6 +333,7 @@ class TapLiteApp(tk.Tk):
         self.notice_var = tk.StringVar(value=self._build_notice())
         self.action_text_var = tk.StringVar()
         self.running_overlay = RunningOverlay(self)
+        self.capture_overlay = PointCaptureOverlay(self, self._handle_capture_confirm, self._handle_capture_cancel)
         self.tray_icon = self._build_tray_icon()
 
         self._build_ui()
@@ -384,7 +582,7 @@ class TapLiteApp(tk.Tk):
         buttons.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         for index, (text, command) in enumerate(
             (
-                ("添加当前位置", self._add_current_point),
+                ("添加位置", self._add_current_point),
                 ("编辑", self._edit_selected_point),
                 ("删除", self._delete_selected_point),
                 ("上移", lambda: self._move_selected_point(-1)),
@@ -598,13 +796,10 @@ class TapLiteApp(tk.Tk):
         return points
 
     def _add_current_point(self) -> None:
-        try:
-            x, y = get_cursor_position()
-        except Exception as exc:
-            messagebox.showerror("无法读取坐标", str(exc))
+        wait_ms = self._read_default_point_wait()
+        if wait_ms is None:
             return
-        self.points_tree.insert("", "end", values=(x, y, self.interval_var.get()))
-        self.status_var.set(f"已添加点 X={x}, Y={y}")
+        self._start_capture_mode(CaptureRequest(kind="multi", wait_ms=wait_ms))
 
     def _selected_point(self) -> str | None:
         selection = self.points_tree.selection()
@@ -651,14 +846,65 @@ class TapLiteApp(tk.Tk):
             self.points_tree.move(item, "", new_index)
 
     def _capture_position(self) -> None:
+        self._start_capture_mode(CaptureRequest(kind="single"))
+
+    def _read_default_point_wait(self) -> int | None:
         try:
-            x, y = get_cursor_position()
-        except Exception as exc:
-            messagebox.showerror("无法读取坐标", str(exc))
+            interval_ms = int(self.interval_var.get())
+        except ValueError:
+            messagebox.showerror("输入错误", "点击间隔必须是整数。")
+            return None
+        if interval_ms < 1:
+            messagebox.showerror("输入错误", "点击间隔必须大于 0。")
+            return None
+        return interval_ms
+
+    def _start_capture_mode(self, request: CaptureRequest) -> None:
+        if sys.platform != "win32":
+            messagebox.showerror("当前平台不支持", "取点模式仅支持 Windows。")
             return
-        self.fixed_x_var.set(str(x))
-        self.fixed_y_var.set(str(y))
-        self.status_var.set(f"已读取坐标 X={x}, Y={y}")
+        self._stop_capture_mode(update_status=False)
+        self._capture_request = request
+        self._capture_overlay_was_visible = bool(self._overlay_title and self.show_running_overlay_var.get())
+        self.running_overlay.hide()
+        title = "读取坐标" if request.kind == "single" else "添加位置"
+        self.capture_overlay.show(title)
+        self.status_var.set("取点中，左键确认，右键或 Esc 取消。")
+
+    def _stop_capture_mode(self, *, update_status: bool) -> None:
+        self._capture_request = None
+        if self.capture_overlay.visible:
+            self.capture_overlay.hide()
+        if self._capture_overlay_was_visible and self._overlay_title:
+            self.running_overlay.show(self._overlay_title, self._stop_hint_text())
+        self._capture_overlay_was_visible = False
+        if update_status and not self.clicker.is_running:
+            self.status_var.set("已取消取点")
+
+    def _handle_capture_confirm(self, x: int, y: int) -> None:
+        request = self._capture_request
+        self._capture_request = None
+        if self._capture_overlay_was_visible and self._overlay_title:
+            self.running_overlay.show(self._overlay_title, self._stop_hint_text())
+        self._capture_overlay_was_visible = False
+        if request is None:
+            return
+        result = apply_capture_request(request, max(x, 0), max(y, 0))
+        if result.fixed_position is not None:
+            fixed_x, fixed_y = result.fixed_position
+            self.fixed_x_var.set(str(fixed_x))
+            self.fixed_y_var.set(str(fixed_y))
+            self.position_mode_var.set("fixed")
+            self.click_mode_var.set("single_point")
+            self._refresh_enabled_fields()
+        if result.point is not None:
+            point = result.point
+            self.points_tree.insert("", "end", values=(point.x, point.y, point.wait_ms))
+        self.status_var.set(result.status_message)
+        self.bell()
+
+    def _handle_capture_cancel(self) -> None:
+        self._stop_capture_mode(update_status=True)
 
     def _read_config(self) -> ClickConfig | None:
         try:
@@ -723,6 +969,7 @@ class TapLiteApp(tk.Tk):
         )
 
     def _toggle_clicking(self) -> None:
+        self._stop_capture_mode(update_status=False)
         if self.clicker.is_running:
             self.clicker.stop()
             self._refresh_running_state()
@@ -758,6 +1005,8 @@ class TapLiteApp(tk.Tk):
             self._show_overlay(self._overlay_title)
 
     def _on_overlay_toggle(self) -> None:
+        if self._capture_request is not None:
+            return
         if self.show_running_overlay_var.get() and self._overlay_title:
             self.running_overlay.show(self._overlay_title, self._stop_hint_text())
         else:
@@ -769,7 +1018,7 @@ class TapLiteApp(tk.Tk):
 
     def _show_overlay(self, title: str) -> None:
         self._overlay_title = title
-        if self.show_running_overlay_var.get():
+        if self.show_running_overlay_var.get() and self._capture_request is None:
             self.running_overlay.show(title, self._stop_hint_text())
 
     def _hide_overlay(self) -> None:
@@ -842,6 +1091,7 @@ class TapLiteApp(tk.Tk):
             self.status_var.set(message)
             self._show_overlay(message)
         elif event.kind == "started":
+            self._stop_capture_mode(update_status=False)
             self.status_var.set(f"运行中，{self._stop_hint_text()}。")
             self._refresh_running_state()
             self._show_overlay("正在连点")
@@ -959,6 +1209,7 @@ class TapLiteApp(tk.Tk):
         self.status_var.set(f"已删除预设：{name}")
 
     def _on_close_requested(self) -> None:
+        self._stop_capture_mode(update_status=False)
         if self._exiting:
             self._close_app()
             return
@@ -969,6 +1220,7 @@ class TapLiteApp(tk.Tk):
 
     def _close_app(self) -> None:
         self._exiting = True
+        self._stop_capture_mode(update_status=False)
         self.clicker.stop()
         self.clicker.wait(timeout=1)
         self.hotkeys.stop()
@@ -976,6 +1228,7 @@ class TapLiteApp(tk.Tk):
             self.tray_icon.stop()
         self._hide_overlay()
         save_settings(self._collect_settings())
+        self.capture_overlay.destroy()
         self.running_overlay.destroy()
         self.destroy()
 
